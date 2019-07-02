@@ -11,11 +11,14 @@ from .. import package_info
 from . import client
 from .constants import InsightsConstants as constants
 from .config import InsightsConfig
+from .support import InsightsSupport
 from .auto_config import try_auto_configuration
+from .schedule import get_scheduler
 from .utilities import (delete_registered_file,
                         delete_unregistered_file,
                         write_to_disk,
-                        generate_machine_id)
+                        generate_machine_id,
+                        validate_remove_file)
 
 logger = logging.getLogger(__name__)
 net_logger = logging.getLogger("network")
@@ -499,13 +502,184 @@ class InsightsClient(object):
         logger.debug('Re-register set, forcing registration.')
         logger.debug('New machine-id: %s', generate_machine_id(new=True))
 
+    def _main(self):
+        '''
+        The execution of client functions when you run insights-client
+        '''
+        # define subroutines
+        def _update():
+            print('UPDATE')
 
-def format_config(config):
-    # Log config except the password
-    # and proxy as it might have a pw as well
-    config_copy = config.copy()
-    try:
-        del config_copy["password"]
-        del config_copy["proxy"]
-    finally:
-        return json.dumps(config_copy, indent=4)
+        def _process_registration():
+            # check registration status before anything else
+            reg_check = self.get_registration_status()
+            if reg_check is None:
+                sys.exit(constants.sig_kill_bad)
+
+            # --status
+            if self.config.status:
+                if reg_check:
+                    logger.info('This host is registered.')
+                    sys.exit(constants.sig_kill_ok)
+                else:
+                    logger.info('This host is unregistered.')
+                    sys.exit(constants.sig_kill_bad)
+
+            # put this first to avoid conflicts with register
+            if self.config.unregister:
+                if reg_check:
+                    logger.info('Unregistering this host from Insights.')
+                    if self.unregister():
+                        get_scheduler(self.config).remove_scheduling()
+                        sys.exit(constants.sig_kill_ok)
+                    else:
+                        sys.exit(constants.sig_kill_bad)
+                else:
+                    logger.info('This host is not registered, unregistration is not applicable.')
+                    sys.exit(constants.sig_kill_bad)
+
+            # halt here if unregistered
+            if not reg_check and not self.config.register:
+                logger.info('This host has not been registered. '
+                            'Use --register to register this host.')
+                sys.exit(constants.sig_kill_bad)
+
+            # --force-reregister, clear machine-id
+            if self.config.reregister:
+                reg_check = False
+                self.clear_local_registration()
+
+            # --register was called
+            if self.config.register:
+                # don't actually need to make a call to register() since
+                #   system creation and upload are a single event on the platform
+                if reg_check:
+                    logger.info('This host has already been registered.')
+                if (not self.config.disable_schedule and
+                   get_scheduler(self.config).set_daily()):
+                    logger.info('Automatic scheduling for Insights has been enabled.')
+
+            # set --display-name independent of register
+            # only do this if set from the CLI. normally display_name is sent on upload
+            if 'display_name' in self.config._cli_opts and not self.config.register:
+                if self.set_display_name(self.config.display_name):
+                    sys.exit(constants.sig_kill_ok)
+                else:
+                    sys.exit(constants.sig_kill_bad)
+
+        def _collect_and_upload():
+            if self.config.payload:
+                insights_archive = self.config.payload
+            else:
+                try:
+                    insights_archive = self.collect()
+                except RuntimeError as e:
+                    logger.error(e)
+                    sys.exit(1)
+                self.config.content_type = 'application/vnd.redhat.advisor.collection+tgz'
+
+            if not insights_archive:
+                sys.exit(1)
+            if self.config.to_stdout:
+                with open(insights_archive, 'rb') as tar_content:
+                    if six.PY3:
+                        sys.stdout.buffer.write(tar_content.read())
+                    else:
+                        shutil.copyfileobj(tar_content, sys.stdout)
+            else:
+                resp = None
+                if not self.config.no_upload:
+                    try:
+                        resp = self.upload(payload=insights_archive,
+                                           content_type=self.config.content_type)
+                    except (ValueError, IOError) as e:
+                        logger.error(str(e))
+                        sys.exit(1)
+                else:
+                    logger.info('Archive saved at %s', insights_archive)
+                if resp:
+                    if self.config.to_json:
+                        print(json.dumps(resp))
+
+                    if not self.config.payload:
+                        # delete the archive
+                        if self.config.keep_archive:
+                            logger.info('Insights archive retained in ' + insights_archive)
+                        else:
+                            self.delete_archive(insights_archive, delete_parent_dir=True)
+            self.delete_cached_branch_info()
+
+        # MAIN BEGINS HERE
+        # -- process options that exit immediately --
+        if self.config.update:
+            # update the egg and exit
+            sys.exit(_update())
+
+        if self.config.version:
+            logger.info(self.version())
+            sys.exit(0)
+
+        # validate the remove file
+        if self.config.validate:
+            if validate_remove_file(self.config.remove_file):
+                sys.exit(0)
+            else:
+                sys.exit(1)
+
+        # handle cron stuff
+        if self.config.enable_schedule:
+            # enable automatic scheduling
+            updated = get_scheduler(self.config).set_daily()
+            if updated:
+                logger.info('Automatic scheduling for Insights has been enabled.')
+            sys.exit(0)
+
+        if self.config.disable_schedule:
+            # disable automatic schedling
+            updated = get_scheduler(self.config).remove_scheduling()
+            if updated:
+                logger.info('Automatic scheduling for Insights has been disabled.')
+            if not self.config.register:
+                sys.exit(0)
+
+        # test the insights connection
+        if self.config.test_connection:
+            sys.exit(self.test_connection())
+
+        if self.config.support:
+            support = InsightsSupport(self.config)
+            support.collect_support_info()
+            sys.exit(0)
+
+        if self.config.diagnosis:
+            remediation_id = None
+            if self.config.diagnosis is not True:
+                remediation_id = self.config.diagnosis
+            resp = self.get_diagnosis(remediation_id)
+            if not resp:
+                sys.exit(1)
+            print(json.dumps(resp))
+            sys.exit(0)
+
+        # -- full collection run begins here --
+        if self.config.offline:
+            logger.debug('Running client in offline mode. Bypassing registration.')
+
+        if self.config.payload:
+            logger.debug('Uploading a specified archive. Bypassing registration.')
+
+        # --offline/--payload short circuits registration check
+        if not self.config.payload and not self.config.offline:
+            _process_registration()
+
+        # _collect()
+        # _upload()
+        # rotate eggs once client completes all work successfully
+        try:
+            self.rotate_eggs()
+        except IOError:
+            message = ("Failed to rotate %s to %s" %
+                       (constants.insights_core_newest,
+                        constants.insights_core_last_stable))
+            logger.debug(message)
+            raise IOError(message)

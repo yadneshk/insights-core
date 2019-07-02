@@ -280,6 +280,12 @@ DEFAULT_OPTS = {
         'help': 'Unregister system from the Red Hat Insights Service',
         'action': 'store_true'
     },
+    'update': {
+        'default': False,
+        'opt': ['--update'],
+        'help': 'Update the insights-core module',
+        'action': 'store_true'
+    },
     'upload_url': {
         # non-CLI
         'default': None

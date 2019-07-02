@@ -319,6 +319,7 @@ class InsightsConnection(object):
         """
         Test connection to Red Hat
         """
+        logger.info("Running Connection Tests...")
         logger.debug("Proxy config: %s", self.proxies)
         try:
             logger.info("=== Begin Upload URL Connection Test ===")
