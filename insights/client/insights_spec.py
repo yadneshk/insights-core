@@ -4,6 +4,7 @@ import errno
 import shlex
 import logging
 import six
+import sys
 from subprocess import Popen, PIPE, STDOUT
 from tempfile import NamedTemporaryFile
 from insights.util import mangle
@@ -56,7 +57,7 @@ class InsightsCommand(InsightsSpec):
         # ensure consistent locale for collected command output
         cmd_env = {'LC_ALL': 'C',
                    'PATH': '/sbin:/bin:/usr/sbin:/usr/bin',
-                   'PYTHONPATH': os.getenv('PYTHONPATH')}
+                   'PYTHONPATH': sys.path[0]}
         args = shlex.split(timeout_command)
 
         # never execute this stuff

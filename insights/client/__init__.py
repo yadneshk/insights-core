@@ -506,9 +506,10 @@ class InsightsClient(object):
         '''
         The execution of client functions when you run insights-client
         '''
-        # define subroutines
+        # define subroutines (carryover from old phases)
         def _update():
             print('UPDATE')
+            print(sys.path)
 
         def _process_registration():
             # check registration status before anything else
@@ -672,8 +673,7 @@ class InsightsClient(object):
         if not self.config.payload and not self.config.offline:
             _process_registration()
 
-        # _collect()
-        # _upload()
+        _collect_and_upload()
         # rotate eggs once client completes all work successfully
         try:
             self.rotate_eggs()
