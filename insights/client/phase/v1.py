@@ -40,21 +40,11 @@ def phase(func):
 
 def get_phases():
     return [{
-        'name': 'pre_update',
-        'run_as_root': True
-    }, {
-        'name': 'update',
-        'run_as_root': True
-    }, {
-        'name': 'post_update',
-        'run_as_root': True
-    }, {
-        'name': 'collect_and_output',
+        'name': 'main',
         'run_as_root': True
     }]
 
 
-@phase
 def pre_update(client, config):
     if config.version:
         logger.info(constants.version)
@@ -114,7 +104,6 @@ def pre_update(client, config):
         sys.exit(constants.sig_kill_ok)
 
 
-@phase
 def update(client, config):
     client.update()
     if config.payload:
@@ -123,7 +112,6 @@ def update(client, config):
     client.update_rules()
 
 
-@phase
 def post_update(client, config):
     # create a machine id first thing. we'll need it for all uploads
     logger.debug('Machine ID: %s', client.get_machine_id())
@@ -247,7 +235,6 @@ def post_update(client, config):
             sys.exit(constants.sig_kill_bad)
 
 
-@phase
 def collect_and_output(client, config):
     if config.payload:
         insights_archive = config.payload
@@ -301,3 +288,12 @@ def collect_and_output(client, config):
                     constants.insights_core_last_stable))
         logger.debug(message)
         raise IOError(message)
+
+
+@phase
+def main(client, config):
+    # maintain compatibility with old RPMs
+    pre_update(client, config)
+    update(client, config)
+    post_update(client, config)
+    collect_and_output(client, config)

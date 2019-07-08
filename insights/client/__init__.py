@@ -508,8 +508,9 @@ class InsightsClient(object):
         '''
         # define subroutines (carryover from old phases)
         def _update():
-            print('UPDATE')
-            print(sys.path)
+            self.update()
+            self.update_rules()
+            sys.exit()
 
         def _process_registration():
             # check registration status before anything else
