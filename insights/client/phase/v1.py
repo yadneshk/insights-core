@@ -132,7 +132,7 @@ def post_update(client, config):
     logger.debug('Machine ID: %s', client.get_machine_id())
     # logger.debug("CONFIG: %s", config)
     print('WHAT')
-    print_egg_versions()
+    # print_egg_versions()
     # -------delete everything below this line-------
     if config.legacy_upload:
         if config.status:
