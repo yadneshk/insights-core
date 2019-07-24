@@ -27,7 +27,9 @@ class InsightsClient(object):
         """
         The Insights client interface
         """
-        print('CLIENT PID: ' + str(os.getpid()))
+        print('CLIENT PID:' str(
+            [item.split()[1] for item in os.popen('tasklist').read().splitlines()[4:] if 'insights-client' in item.split()]))
+        print('CLIENT-RUN PID: ' + str(os.getpid()))
         if config is None:
             # initialize with default config if not specified with one
             self.config = InsightsConfig()
