@@ -27,7 +27,7 @@ class InsightsClient(object):
         """
         The Insights client interface
         """
-        logger.info('CLIENT PID: ' + os.getpid())
+        print('CLIENT PID: ' + str(os.getpid()))
         if config is None:
             # initialize with default config if not specified with one
             self.config = InsightsConfig()
