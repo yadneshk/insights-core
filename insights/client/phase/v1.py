@@ -130,7 +130,7 @@ def update(client, config):
 def post_update(client, config):
     # create a machine id first thing. we'll need it for all uploads
     logger.debug('Machine ID: %s', client.get_machine_id())
-    logger.debug("CONFIG: %s", config)
+    # logger.debug("CONFIG: %s", config)
     print('WHAT')
     print_egg_versions()
     # -------delete everything below this line-------
