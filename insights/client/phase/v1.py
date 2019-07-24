@@ -30,10 +30,10 @@ def phase(func):
             sys.exit(constants.sig_kill_bad)
         client = InsightsClient(config)
         if config.debug:
-            print('PHASE: ' + os.getenv('INSIGHTS_PHASE'))
             logger.info("Core path: %s", os.path.dirname(__file__))
         try:
             func(client, config)
+            print('PHASE: ' + os.getenv('INSIGHTS_PHASE'))
         except Exception:
             logger.exception("Fatal error")
             sys.exit(1)
@@ -132,7 +132,8 @@ def post_update(client, config):
     # create a machine id first thing. we'll need it for all uploads
     logger.debug('Machine ID: %s', client.get_machine_id())
     logger.debug("CONFIG: %s", config)
-    # print_egg_versions()
+    print('WHAT')
+    print_egg_versions()
     # -------delete everything below this line-------
     if config.legacy_upload:
         if config.status:
