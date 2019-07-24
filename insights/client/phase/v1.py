@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 def phase(func):
     @functools.wraps(func)
     def _f():
+        logger.info('CLIENT-RUN PID: ' + os.getpid())
         try:
             config = InsightsConfig().load_all()
         except ValueError as e:
