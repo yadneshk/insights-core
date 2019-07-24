@@ -214,9 +214,10 @@ def run_command_get_output(cmd):
 
 def getpid():
     ps = Popen(['ps', '-ef'], stdout=PIPE)
-    pgrep = Popen(['pgrep', 'insights-client'], stdin=ps.stdout, stdout=PIPE)
+    pgrep = Popen(['pgrep', '-x', 'insights-client'], stdin=ps.stdout, stdout=PIPE)
     stdout, stderr = pgrep.communicate()
     return stdout
+
 
 def modify_config_file(updates):
     '''
