@@ -15,7 +15,8 @@ from .auto_config import try_auto_configuration
 from .utilities import (delete_registered_file,
                         delete_unregistered_file,
                         write_to_disk,
-                        generate_machine_id)
+                        generate_machine_id,
+                        run_command_get_output)
 
 logger = logging.getLogger(__name__)
 net_logger = logging.getLogger("network")
@@ -27,8 +28,7 @@ class InsightsClient(object):
         """
         The Insights client interface
         """
-        print('CLIENT PID:' + str(
-            [item.split()[1] for item in os.popen('tasklist').read().splitlines()[4:] if 'insights-client' in item.split()]))
+        print('CLIENT PID:' + run_command_get_output('ps -ef | pgrep insights-client')['output'])
         print('CLIENT-RUN PID: ' + str(os.getpid()))
         if config is None:
             # initialize with default config if not specified with one
