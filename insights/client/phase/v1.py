@@ -15,7 +15,7 @@ from insights.client.utilities import validate_remove_file, print_egg_versions
 from insights.client.schedule import get_scheduler
 
 logger = logging.getLogger(__name__)
-a = 0
+
 
 def phase(func):
     @functools.wraps(func)
@@ -29,9 +29,8 @@ def phase(func):
             sys.exit(constants.sig_kill_bad)
         client = InsightsClient(config)
         if config.debug:
-            print(a)
+            print('PHASE: ' + os.getenv('INSIGHTS_PHASE'))
             logger.info("Core path: %s", os.path.dirname(__file__))
-            a += 1
         try:
             func(client, config)
         except Exception:
