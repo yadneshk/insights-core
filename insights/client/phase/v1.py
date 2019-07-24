@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 def phase(func):
     @functools.wraps(func)
     def _f():
-        # print('CLIENT-RUN PID: ' + str(os.getpid()))
+        print('CLIENT-RUN PID: ' + str(os.getpid()))
+        print('PHASE: ' + os.getenv('INSIGHTS_PHASE'))
         try:
             config = InsightsConfig().load_all()
         except ValueError as e:
