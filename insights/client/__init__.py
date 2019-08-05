@@ -30,7 +30,7 @@ class InsightsClient(object):
         The Insights client interface
         """
         print('CLIENT PID:' + getpid())
-        # print('CLIENT-RUN PID: ' + str(os.getpid()))
+        print('CURRENT-PID: ' + str(os.getpid()))
         if config is None:
             # initialize with default config if not specified with one
             self.config = InsightsConfig()
