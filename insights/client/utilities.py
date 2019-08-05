@@ -239,7 +239,7 @@ def get_version_info():
 
     cmd = 'rpm -q --qf "%{VERSION}-%{RELEASE}" insights-client'
     version_info = {}
-    version_info['core_version'] = InsightsClient().version()
+    version_info['core_version'] = InsightsClient(None, False).version()
     version_info['client_version'] = run_command_get_output(cmd)['output']
 
     return version_info
@@ -271,7 +271,7 @@ def print_egg_versions():
             logger.debug('%s not found.', egg)
             continue
         try:
-            proc = Popen([sys.executable, '-c', 'from insights.client import InsightsClient; print(InsightsClient().version())'],
+            proc = Popen([sys.executable, '-c', 'from insights.client import InsightsClient; print(InsightsClient(None, False).version())'],
                          env={'PYTHONPATH': egg, 'PATH': os.getenv('PATH')}, stdout=PIPE, stderr=STDOUT)
         except OSError:
             logger.debug('Could not start python.')
