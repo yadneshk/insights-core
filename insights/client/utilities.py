@@ -215,7 +215,7 @@ def run_command_get_output(cmd):
 def getpid():
     ps = Popen(['ps', '-ef'], stdout=PIPE)
     # pgrep = Popen(['pgrep', '-cf', 'insights-client'], stdin=ps.stdout, stdout=PIPE)
-    pgrep = Popen(['pgrep', '-co', 'insights-client'], stdin=ps.stdout, stdout=PIPE)
+    pgrep = Popen(['pgrep', '-fl', 'insights-client'], stdin=ps.stdout, stdout=PIPE)
     stdout, stderr = pgrep.communicate()
     return stdout
 
