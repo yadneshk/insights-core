@@ -35,7 +35,7 @@ def init_sedfile():
     '''
     Extract sedfile from egg to a place where it can be read by sed
     '''
-    eggpath = os.environ('PYTHONPATH')
+    eggpath = os.environ.get('PYTHONPATH', '')
     if not eggpath:
         logger.debug('Could not recognize egg from PYTHONPATH')
         return constants.default_sed_file
