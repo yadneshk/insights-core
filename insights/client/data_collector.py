@@ -42,8 +42,9 @@ def init_sedfile():
     try:
         eggfile = ZipFile(eggpath)
         zip_sed = 'insights/client/.exp.sed'
-        tmp_sed = os.path.join(mkdtemp(prefix='/var/tmp/'), '.exp.sed')
-        eggfile.extract(zip_sed, tmp_sed)
+        tmp_sed_dir = mkdtemp(prefix='/var/tmp/')
+        eggfile.extract(zip_sed, tmp_sed_dir)
+        tmp_sed = os.path.join(tmp_sed_dir, '.exp.sed')
         with open(tmp_sed) as t:
             print(t.read())
         eggfile.close()
