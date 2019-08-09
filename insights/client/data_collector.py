@@ -40,7 +40,7 @@ def init_sedfile():
         logger.debug('Could not recognize egg from PYTHONPATH')
         return constants.default_sed_file
     try:
-        eggfile = Zipfile(eggpath)
+        eggfile = ZipFile(eggpath)
         zip_sed = 'insights/client/.exp.sed'
         tmp_sed = os.path.join(mkdtemp(prefix='/var/tmp/'), '.exp.sed')
         eggfile.extract(zip_sed, tmp_sed)
