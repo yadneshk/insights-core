@@ -11,8 +11,9 @@ import copy
 import glob
 import six
 import shlex
+from zipfile import ZipFile
 from subprocess import Popen, PIPE, STDOUT
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, mkdtemp
 
 from insights.util import mangle
 from ..contrib.soscleaner import SOSCleaner
@@ -30,6 +31,28 @@ SOSCLEANER_LOGGER = logging.getLogger('insights-client.soscleaner')
 SOSCLEANER_LOGGER.setLevel(logging.ERROR)
 
 
+def init_sedfile():
+    '''
+    Extract sedfile from egg to a place where it can be read by sed
+    '''
+    eggpath = os.environ('PYTHONPATH')
+    if not eggpath:
+        logger.debug('Could not recognize egg from PYTHONPATH')
+        return constants.default_sed_file
+    try:
+        eggfile = Zipfile(eggpath)
+        zip_sed = 'insights/client/.exp.sed'
+        tmp_sed = os.path.join(mkdtemp(prefix='/var/tmp/'), '.exp.sed')
+        eggfile.extract(zip_sed, tmp_sed)
+        with open(tmp_sed) as t:
+            print(t.read())
+        eggfile.close()
+    except RuntimeError:
+        logger.debug('Could not load egg as zipfile')
+        return constants.default_sed_file
+    return tmp_sed
+
+
 class DataCollector(object):
     '''
     Run commands and collect files
@@ -42,6 +65,7 @@ class DataCollector(object):
         if mountpoint:
             self.mountpoint = mountpoint
         self.hostname_path = None
+        self.sedfile = init_sedfile()
 
     def _write_branch_info(self, branch_info):
         logger.debug("Writing branch information to archive...")
