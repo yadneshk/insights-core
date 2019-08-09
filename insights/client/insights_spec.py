@@ -18,19 +18,20 @@ class InsightsSpec(object):
     '''
     A spec loaded from the uploader.json
     '''
-    def __init__(self, config, spec, exclude):
+    def __init__(self, config, spec, exclude, sedfile):
         self.config = config
         # exclusions patterns for this spec
         self.exclude = exclude
         # pattern for spec collection
         self.pattern = spec['pattern'] if spec['pattern'] else None
+        self.sedfile = sedfile
 
 
 class InsightsCommand(InsightsSpec):
     '''
     A command spec
     '''
-    def __init__(self, config, spec, exclude, mountpoint):
+    def __init__(self, config, spec, exclude, mountpoint, sedfile):
         InsightsSpec.__init__(self, config, spec, exclude)
         self.command = spec['command'].replace(
             '{CONTAINER_MOUNT_POINT}', mountpoint)
@@ -76,7 +77,7 @@ class InsightsCommand(InsightsSpec):
 
         dirty = False
 
-        cmd = "sed -rf " + constants.default_sed_file
+        cmd = "sed -rf " + self.sedfile
         sedcmd = Popen(shlex.split(cmd),
                        stdin=proc0.stdout,
                        stdout=PIPE)
@@ -138,8 +139,8 @@ class InsightsFile(InsightsSpec):
     '''
     A file spec
     '''
-    def __init__(self, spec, exclude, mountpoint):
-        InsightsSpec.__init__(self, None, spec, exclude)
+    def __init__(self, spec, exclude, mountpoint, sedfile):
+        InsightsSpec.__init__(self, None, spec, exclude, sedfile)
         # substitute mountpoint for collection
         self.real_path = os.path.join(mountpoint, spec['file'].lstrip('/'))
         self.archive_path = spec['file']
@@ -155,7 +156,7 @@ class InsightsFile(InsightsSpec):
         cmd = []
         cmd.append('sed')
         cmd.append('-rf')
-        cmd.append(constants.default_sed_file)
+        cmd.append(self.sedfile)
         cmd.append(self.real_path)
         sedcmd = Popen(cmd,
                        stdout=PIPE)
