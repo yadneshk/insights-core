@@ -32,7 +32,7 @@ class InsightsCommand(InsightsSpec):
     A command spec
     '''
     def __init__(self, config, spec, exclude, mountpoint, sedfile):
-        InsightsSpec.__init__(self, config, spec, exclude)
+        InsightsSpec.__init__(self, config, spec, exclude, sedfile)
         self.command = spec['command'].replace(
             '{CONTAINER_MOUNT_POINT}', mountpoint)
         self.archive_path = mangle.mangle_command(self.command)
