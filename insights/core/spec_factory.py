@@ -10,9 +10,9 @@ from glob import glob
 from subprocess import call
 
 from insights.core import blacklist, dr
-from insights.core.filters import get_filters
+from insights.core.filters import _add_filter, get_filters
 from insights.core.context import ExecutionContext, FSRoots, HostContext
-from insights.core.plugins import datasource, ContentException, is_datasource
+from insights.core.plugins import component, datasource, ContentException, is_datasource
 from insights.util import fs, streams, which
 from insights.util.subproc import Pipeline
 from insights.core.serde import deserializer, serializer
@@ -22,11 +22,20 @@ log = logging.getLogger(__name__)
 
 
 SAFE_ENV = {
-    "PATH": os.path.pathsep.join(["/bin", "/usr/bin", "/sbin", "/usr/sbin"]),
+    "PATH": os.path.pathsep.join([
+        "/bin",
+        "/usr/bin",
+        "/sbin",
+        "/usr/sbin",
+        "/usr/share/Modules/bin",
+    ]),
+    "LC_ALL": "C",
 }
 """
 A minimal set of environment variables for use in subprocess calls
 """
+if "LANG" in os.environ:
+    SAFE_ENV["LANG"] = os.environ["LANG"]
 
 
 def enc(s):
@@ -83,7 +92,7 @@ class ContentProvider(object):
         self._exception = None
 
     def load(self):
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def stream(self):
         """
@@ -94,7 +103,7 @@ class ContentProvider(object):
             yield l.rstrip("\n")
 
     def _stream(self):
-        raise NotImplemented()
+        raise NotImplementedError()
 
     @property
     def path(self):
@@ -123,6 +132,33 @@ class ContentProvider(object):
 
     def __str__(self):
         return self.__unicode__()
+
+
+class DatasourceProvider(ContentProvider):
+    def __init__(self, content, relative_path, root='/', ds=None, ctx=None):
+        super(DatasourceProvider, self).__init__()
+        self.relative_path = relative_path
+        self._content = content if isinstance(content, list) else content.splitlines()
+        self.root = root
+        self.ds = ds
+        self.ctx = ctx
+
+    def _stream(self):
+        """
+        Returns a generator of lines instead of a list of lines.
+        """
+        yield self._content
+
+    def write(self, dst):
+        fs.ensure_path(os.path.dirname(dst))
+        with open(dst, "wb") as f:
+            f.write("\n".join(self.content).encode("utf-8"))
+
+        self.loaded = False
+        self._content = None
+
+    def load(self):
+        return self.content
 
 
 class FileProvider(ContentProvider):
@@ -573,10 +609,10 @@ class head(object):
     """
     Return the first element of any datasource that produces a list.
     """
-    def __init__(self, dep):
+    def __init__(self, dep, **kwargs):
         self.dep = dep
         self.__name__ = self.__class__.__name__
-        datasource(dep)(self)
+        datasource(dep, **kwargs)(self)
 
     def __call__(self, lst):
         c = lst[self.dep]
@@ -835,6 +871,74 @@ class first_of(object):
                 return broker[c]
 
 
+class find(object):
+    """
+    Helper class for extracting specific lines from a datasource for direct
+    consumption by a rule.
+
+    .. code:: python
+
+        service_starts = find(Specs.audit_log, "SERVICE_START")
+
+        @rule(service_starts)
+        def report(starts):
+            return make_info("SERVICE_STARTS", num_starts=len(starts))
+
+    Args:
+        spec (datasource): some datasource, ideally filterable.
+        pattern (string / list): a string or list of strings to match (no
+            patterns supported)
+
+    Returns:
+        A dict where each key is a command, path, or spec name, and each value
+        is a non-empty list of matching lines. Only paths with matching lines
+        are included.
+
+    Raises:
+        dr.SkipComponent if no paths have matching lines.
+    """
+
+    def __init__(self, spec, pattern):
+        if getattr(spec, "raw", False):
+            name = dr.get_name(spec)
+            raise ValueError("{}: Cannot filter raw files.".format(name))
+
+        self.spec = spec
+        self.pattern = pattern if isinstance(pattern, list) else [pattern]
+        self.__name__ = self.__class__.__name__
+        self.__module__ = self.__class__.__module__
+
+        if getattr(spec, "filterable", False):
+            _add_filter(spec, pattern)
+
+        component(spec)(self)
+
+    def __call__(self, ds):
+        # /usr/bin/grep level filtering is applied behind .content or
+        # .stream(), but we still need to ensure we get only what *this* find
+        # instance wants. This can be inefficient on files where many lines
+        # match.
+        results = {}
+        ds = ds if isinstance(ds, list) else [ds]
+        for d in ds:
+            if d.relative_path:
+                origin = os.path.join("/", d.relative_path.lstrip("/"))
+            elif d.cmd:
+                origin = d.cmd
+            else:
+                origin = dr.get_name(self.spec)
+            stream = d.content if d.loaded else d.stream()
+            lines = []
+            for line in stream:
+                if any(p in line for p in self.pattern):
+                    lines.append(line)
+            if lines:
+                results[origin] = lines
+        if not results:
+            raise dr.SkipComponent()
+        return dict(results)
+
+
 @serializer(CommandOutputProvider)
 def serialize_command_output(obj, root):
     rel = os.path.join("insights_commands", mangle_command(obj.cmd))
@@ -894,3 +998,16 @@ def deserialize_raw_file_provider(_type, data, root):
     res = SerializedRawOutputProvider(rel, root)
     res.rc = data["rc"]
     return res
+
+
+@serializer(DatasourceProvider)
+def serialize_datasource_provider(obj, root):
+    dst = os.path.join(root, obj.relative_path.lstrip("/"))
+    fs.ensure_path(os.path.dirname(dst))
+    obj.write(dst)
+    return {"relative_path": obj.relative_path}
+
+
+@deserializer(DatasourceProvider)
+def deserialize_datasource_provider(_type, data, root):
+    return SerializedRawOutputProvider(data["relative_path"], root)

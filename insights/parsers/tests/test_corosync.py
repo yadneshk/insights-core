@@ -1,7 +1,8 @@
 import doctest
+import pytest
+from insights.parsers import corosync, SkipException
 
-from insights.configtree import first, last
-from insights.parsers import corosync
+from insights.parsr.query import first, last
 from insights.tests import context_wrap
 
 corosync_content = """
@@ -82,6 +83,11 @@ def test_corosync_conf():
 
     conf = corosync.CorosyncConf(context_wrap(COROSYNC_CONF_2))
     assert conf['totem']['version'][first].value == 2
+
+
+def test_corosync_conf_empty():
+    with pytest.raises(SkipException):
+        assert corosync.CorosyncConf(context_wrap('')) is None
 
 
 def test_doc_examples():

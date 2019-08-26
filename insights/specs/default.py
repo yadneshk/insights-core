@@ -8,6 +8,7 @@ this file with the same `name` keyword argument. This allows overriding the
 data sources that standard Insights `Parsers` resolve against.
 """
 
+import logging
 import os
 import re
 
@@ -17,13 +18,44 @@ from insights.core.context import HostContext
 from insights.core.context import HostArchiveContext
 from insights.core.context import OpenShiftContext
 
+from insights.core.dr import SkipComponent
 from insights.core.plugins import datasource
-from insights.core.spec_factory import CommandOutputProvider, ContentException, RawFileProvider
+from insights.core.spec_factory import CommandOutputProvider, ContentException, DatasourceProvider, RawFileProvider
 from insights.core.spec_factory import simple_file, simple_command, glob_file
 from insights.core.spec_factory import first_of, foreach_collect, foreach_execute
 from insights.core.spec_factory import first_file, listdir
-from insights.parsers.mount import Mount
+from insights.parsers.mount import Mount, ProcMounts
+from insights.combiners.cloud_provider import CloudProvider
 from insights.specs import Specs
+
+from grp import getgrgid
+from os import stat
+from pwd import getpwuid
+
+
+logger = logging.getLogger(__name__)
+
+
+def get_owner(filename):
+    st = stat(filename)
+    name = getpwuid(st.st_uid).pw_name
+    group = getgrgid(st.st_gid).gr_name
+    return (name, group)
+
+
+def get_cmd_and_package_in_ps(broker, target_command):
+        ps = broker[DefaultSpecs.ps_auxww].content
+        ctx = broker[HostContext]
+        results = set()
+        for p in ps:
+            p_splits = p.split(None, 10)
+            cmd = p_splits[10].split()[0] if len(p_splits) == 11 else ''
+            which = ctx.shell_out("which {0}".format(cmd)) if target_command in os.path.basename(cmd) else None
+            resolved = ctx.shell_out("readlink -e {0}".format(which[0])) if which else None
+            pkg = ctx.shell_out("/bin/rpm -qf {0}".format(resolved[0])) if resolved else None
+            if cmd and pkg is not None:
+                results.add("{0} {1}".format(cmd, pkg[0]))
+        return results
 
 
 def _make_rpm_formatter(fmt=None):
@@ -60,15 +92,36 @@ class DefaultSpecs(Specs):
     autofs_conf = simple_file("/etc/autofs.conf")
     avc_hash_stats = simple_file("/sys/fs/selinux/avc/hash_stats")
     avc_cache_threshold = simple_file("/sys/fs/selinux/avc/cache_threshold")
+
+    @datasource(CloudProvider)
+    def is_aws(broker):
+        cp = broker[CloudProvider]
+        if cp and cp.cloud_provider == CloudProvider.AWS:
+            return True
+        raise SkipComponent()
+
+    aws_instance_type = simple_command("/usr/bin/curl http://169.254.169.254/latest/meta-data/instance-type --connect-timeout 5", deps=[is_aws])
+
+    @datasource(CloudProvider)
+    def is_azure(broker):
+        cp = broker[CloudProvider]
+        if cp and cp.cloud_provider == CloudProvider.AZURE:
+            return True
+        raise SkipComponent()
+
+    azure_instance_type = simple_command("curl -H Metadata:true http://169.254.169.254/metadata/instance/compute/vmSize?api-version=2018-10-01&format=text --connect-timeout 5", deps=[is_azure])
     bios_uuid = simple_command("/usr/sbin/dmidecode -s system-uuid")
     blkid = simple_command("/sbin/blkid -c /dev/null")
     bond = glob_file("/proc/net/bonding/bond*")
     bond_dynamic_lb = glob_file("/sys/class/net/bond[0-9]*/bonding/tlb_dynamic_lb")
+    boot_loader_entries = glob_file("/boot/loader/entries/*.conf")
     branch_info = simple_file("/branch_info", kind=RawFileProvider)
     brctl_show = simple_command("/usr/sbin/brctl show")
     candlepin_log = simple_file("/var/log/candlepin/candlepin.log")
     candlepin_error_log = simple_file("/var/log/candlepin/error.log")
+    cgroups = simple_file("/proc/cgroups")
     checkin_conf = simple_file("/etc/splice/checkin.conf")
+    ps_alxwww = simple_command("/bin/ps alxwww")
     ps_aux = simple_command("/bin/ps aux")
     ps_auxcww = simple_command("/bin/ps auxcww")
     ps_auxww = simple_command("/bin/ps auxww")
@@ -91,8 +144,9 @@ class DefaultSpecs(Specs):
     catalina_out = foreach_collect(tomcat_base, "%s/catalina.out")
     catalina_server_log = foreach_collect(tomcat_base, "%s/catalina*.log")
     cciss = glob_file("/proc/driver/cciss/cciss*")
+    cdc_wdm = simple_file("/sys/bus/usb/drivers/cdc_wdm/module/refcnt")
     ceilometer_central_log = simple_file("/var/log/ceilometer/central.log")
-    ceilometer_collector_log = simple_file("/var/log/ceilometer/collector.log")
+    ceilometer_collector_log = first_file(["/var/log/containers/ceilometer/collector.log", "/var/log/ceilometer/collector.log"])
     ceilometer_compute_log = first_file(["/var/log/containers/ceilometer/compute.log", "/var/log/ceilometer/compute.log"])
     ceilometer_conf = first_file(["/var/lib/config-data/puppet-generated/ceilometer/etc/ceilometer/ceilometer.conf", "/etc/ceilometer/ceilometer.conf"])
     ceph_socket_files = listdir("/var/run/ceph/ceph-*.*.asok", context=HostContext)
@@ -100,6 +154,16 @@ class DefaultSpecs(Specs):
     ceph_config_show = foreach_execute(ceph_socket_files, "/usr/bin/ceph daemon %s config show")
     ceph_df_detail = simple_command("/usr/bin/ceph df detail -f json-pretty")
     ceph_health_detail = simple_command("/usr/bin/ceph health detail -f json-pretty")
+
+    @datasource(ps_auxww)
+    def is_ceph_monitor(broker):
+        ps = broker[DefaultSpecs.ps_auxww].content
+        findall = re.compile(r"ceph\-mon").findall
+        if any(findall(p) for p in ps):
+            return True
+        raise SkipComponent()
+
+    ceph_insights = simple_command("/usr/bin/ceph insights", deps=[is_ceph_monitor])
     ceph_log = simple_file("/var/log/ceph/ceph.log")
     ceph_osd_dump = simple_command("/usr/bin/ceph osd dump -f json-pretty")
     ceph_osd_df = simple_command("/usr/bin/ceph osd df -f json-pretty")
@@ -114,6 +178,7 @@ class DefaultSpecs(Specs):
     chrony_conf = simple_file("/etc/chrony.conf")
     chronyc_sources = simple_command("/usr/bin/chronyc sources")
     cib_xml = simple_file("/var/lib/pacemaker/cib/cib.xml")
+    cinder_api_log = first_file(["/var/log/containers/cinder/cinder-api.log", "/var/log/cinder/cinder-api.log"])
     cinder_conf = first_file(["/var/lib/config-data/puppet-generated/cinder/etc/cinder/cinder.conf", "/etc/cinder/cinder.conf"])
     cinder_volume_log = simple_file("/var/log/cinder/volume.log")
     cluster_conf = simple_file("/etc/cluster/cluster.conf")
@@ -133,10 +198,13 @@ class DefaultSpecs(Specs):
     cpu_vulns_spectre_v1 = simple_file("sys/devices/system/cpu/vulnerabilities/spectre_v1")
     cpu_vulns_spectre_v2 = simple_file("sys/devices/system/cpu/vulnerabilities/spectre_v2")
     cpu_vulns_spec_store_bypass = simple_file("sys/devices/system/cpu/vulnerabilities/spec_store_bypass")
-    # why the /cpuinfo?
-    cpuinfo = first_file(["/proc/cpuinfo", "/cpuinfo"])
+    cpuinfo = simple_file("/proc/cpuinfo")
     cpuinfo_max_freq = simple_file("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
     cpuset_cpus = simple_file("/sys/fs/cgroup/cpuset/cpuset.cpus")
+    crypto_policies_config = simple_file("/etc/crypto-policies/config")
+    crypto_policies_state_current = simple_file("/etc/crypto-policies/state/current")
+    crypto_policies_opensshserver = simple_file("/etc/crypto-policies/back-ends/opensshserver.config")
+    crypto_policies_bind = simple_file("/etc/crypto-policies/back-ends/bind.config")
     current_clocksource = simple_file("/sys/devices/system/clocksource/clocksource0/current_clocksource")
     date = simple_command("/bin/date")
     date_iso = simple_command("/bin/date --iso-8601=seconds")
@@ -149,13 +217,15 @@ class DefaultSpecs(Specs):
     dig_edns = simple_command("/usr/bin/dig +edns=0 . SOA")
     dig_noedns = simple_command("/usr/bin/dig +noedns . SOA")
     dirsrv = simple_file("/etc/sysconfig/dirsrv")
-    dirsrv_access = glob_file("var/log/dirsrv/*/access")
-    dirsrv_errors = glob_file("var/log/dirsrv/*/errors")
+    dirsrv_access = glob_file("var/log/dirsrv/*/access*")
+    dirsrv_errors = glob_file("var/log/dirsrv/*/errors*")
     display_java = simple_command("/usr/sbin/alternatives --display java")
     dmesg = simple_command("/bin/dmesg")
+    dmesg_log = simple_file("/var/log/dmesg")
     dmidecode = simple_command("/usr/sbin/dmidecode")
     dmsetup_info = simple_command("/usr/sbin/dmsetup info -C")
     dnf_modules = glob_file("/etc/dnf/modules.d/*.module")
+    dnsmasq_config = glob_file(["/etc/dnsmasq.conf", "/etc/dnsmasq.d/*.conf"])
     docker_info = simple_command("/usr/bin/docker info")
     docker_list_containers = simple_command("/usr/bin/docker ps --all --no-trunc")
     docker_list_images = simple_command("/usr/bin/docker images --all --no-trunc --digests")
@@ -196,17 +266,27 @@ class DefaultSpecs(Specs):
     docker_storage = simple_file("/etc/sysconfig/docker-storage")
     docker_storage_setup = simple_file("/etc/sysconfig/docker-storage-setup")
     docker_sysconfig = simple_file("/etc/sysconfig/docker")
-    dumpdev = simple_command("/bin/awk '/ext[234]/ { print $1; }' /proc/mounts")
+
+    @datasource(ProcMounts)
+    def dumpdev(broker):
+        mnt = broker[ProcMounts]
+        mounted_dev = [m.mounted_device for m in mnt if m.mount_type in ('ext2', 'ext3', 'ext4')]
+        if mounted_dev:
+            return mounted_dev
+        raise SkipComponent()
+
     dumpe2fs_h = foreach_execute(dumpdev, "/sbin/dumpe2fs -h %s")
     engine_config_all = simple_command("/usr/bin/engine-config --all")
     engine_log = simple_file("/var/log/ovirt-engine/engine.log")
     etc_journald_conf = simple_file(r"etc/systemd/journald.conf")
     etc_journald_conf_d = glob_file(r"etc/systemd/journald.conf.d/*.conf")
     etc_machine_id = simple_file("/etc/machine-id")
+    etcd_conf = simple_file("/etc/etcd/etcd.conf")
     ethernet_interfaces = listdir("/sys/class/net", context=HostContext)
     dcbtool_gc_dcb = foreach_execute(ethernet_interfaces, "/sbin/dcbtool gc %s dcb")
     ethtool = foreach_execute(ethernet_interfaces, "/sbin/ethtool %s")
     ethtool_S = foreach_execute(ethernet_interfaces, "/sbin/ethtool -S %s")
+    ethtool_T = foreach_execute(ethernet_interfaces, "/sbin/ethtool -T %s")
     ethtool_a = foreach_execute(ethernet_interfaces, "/sbin/ethtool -a %s")
     ethtool_c = foreach_execute(ethernet_interfaces, "/sbin/ethtool -c %s")
     ethtool_g = foreach_execute(ethernet_interfaces, "/sbin/ethtool -g %s")
@@ -215,6 +295,7 @@ class DefaultSpecs(Specs):
     exim_conf = simple_file("etc/exim.conf")
     facter = simple_command("/usr/bin/facter")
     fc_match = simple_command("/bin/fc-match -sv 'sans:regular:roman' family fontformat")
+    fcoeadm_i = simple_command("/usr/sbin/fcoeadm -i")
     fdisk_l = simple_command("/sbin/fdisk -l")
     foreman_production_log = simple_file("/var/log/foreman/production.log")
     foreman_proxy_conf = simple_file("/etc/foreman-proxy/settings.yml")
@@ -222,10 +303,11 @@ class DefaultSpecs(Specs):
     foreman_satellite_log = simple_file("/var/log/foreman-installer/satellite.log")
     foreman_ssl_access_ssl_log = simple_file("var/log/httpd/foreman-ssl_access_ssl.log")
     foreman_rake_db_migrate_status = simple_command('/usr/sbin/foreman-rake db:migrate:status')
-    foreman_tasks_config = simple_file("/etc/sysconfig/foreman-tasks")
+    foreman_tasks_config = first_file(["/etc/sysconfig/foreman-tasks", "/etc/sysconfig/dynflowd"])
+    freeipa_healthcheck_log = simple_file("/var/log/ipa/healthcheck/healthcheck.log")
     fstab = simple_file("/etc/fstab")
     galera_cnf = first_file(["/var/lib/config-data/puppet-generated/mysql/etc/my.cnf.d/galera.cnf", "/etc/my.cnf.d/galera.cnf"])
-    getcert_list = simple_command("/usr/bin/getcert list")
+    getconf_page_size = simple_command("/usr/bin/getconf PAGE_SIZE")
     getenforce = simple_command("/usr/sbin/getenforce")
     getsebool = simple_command("/usr/sbin/getsebool -a")
     glance_api_conf = first_file(["/var/lib/config-data/puppet-generated/glance_api/etc/glance/glance-api.conf", "/etc/glance/glance-api.conf"])
@@ -237,17 +319,17 @@ class DefaultSpecs(Specs):
     gnocchi_conf = first_file(["/var/lib/config-data/puppet-generated/gnocchi/etc/gnocchi/gnocchi.conf", "/etc/gnocchi/gnocchi.conf"])
     gnocchi_metricd_log = first_file(["/var/log/containers/gnocchi/gnocchi-metricd.log", "/var/log/gnocchi/metricd.log"])
     grub_conf = simple_file("/boot/grub/grub.conf")
+    grub_config_perms = simple_command("/bin/ls -l /boot/grub2/grub.cfg")  # only RHEL7 and updwards
     grub_efi_conf = simple_file("/boot/efi/EFI/redhat/grub.conf")
+    grub1_config_perms = simple_command("/bin/ls -l /boot/grub/grub.conf")  # RHEL6
     grub2_cfg = simple_file("/boot/grub2/grub.cfg")
     grub2_efi_cfg = simple_file("boot/efi/EFI/redhat/grub.cfg")
-    grub_config_perms = simple_command("/bin/ls -l /boot/grub2/grub.cfg")  # only RHEL7 and updwards
-    grub1_config_perms = simple_command("/bin/ls -l /boot/grub/grub.conf")  # RHEL6
     grubby_default_index = simple_command("/usr/sbin/grubby --default-index")  # only RHEL7 and updwards
     grubby_default_kernel = simple_command("/usr/sbin/grubby --default-kernel")  # RHEL6 and updwards
     hammer_ping = simple_command("/usr/bin/hammer ping")
     hammer_task_list = simple_command("/usr/bin/hammer --csv task list")
     haproxy_cfg = first_file(["/var/lib/config-data/puppet-generated/haproxy/etc/haproxy/haproxy.cfg", "/etc/haproxy/haproxy.cfg"])
-    heat_api_log = first_file(["/var/log/containers/heat/heat-api.log", "/var/log/heat/heat-api.log"])
+    heat_api_log = first_file(["/var/log/containers/heat/heat_api.log", "/var/log/heat/heat-api.log", "/var/log/heat/heat_api.log"])
     heat_conf = first_file(["/var/lib/config-data/puppet-generated/heat/etc/heat/heat.conf", "/etc/heat/heat.conf"])
     heat_crontab = simple_command("/usr/bin/crontab -l -u heat")
     heat_crontab_container = simple_command("docker exec heat_api_cron /usr/bin/crontab -l -u heat")
@@ -256,10 +338,33 @@ class DefaultSpecs(Specs):
     hosts = simple_file("/etc/hosts")
     hponcfg_g = simple_command("/sbin/hponcfg -g")
     httpd_access_log = simple_file("/var/log/httpd/access_log")
-    httpd_conf = glob_file(["/etc/httpd/conf/httpd.conf", "/etc/httpd/conf.d/*.conf"])
-    httpd_conf_scl_httpd24 = glob_file(["/opt/rh/httpd24/root/etc/httpd/conf/httpd.conf", "/opt/rh/httpd24/root/etc/httpd/conf.d/*.conf"])
-    httpd_conf_scl_jbcs_httpd24 = glob_file(["/opt/rh/jbcs-httpd24/root/etc/httpd/conf/httpd.conf", "/opt/rh/jbcs-httpd24/root/etc/httpd/conf.d/*.conf"])
+    httpd_conf = glob_file(
+        [
+            "/etc/httpd/conf/httpd.conf",
+            "/etc/httpd/conf.d/*.conf",
+            "/etc/httpd/conf.d/*/*.conf",
+            "/etc/httpd/conf.modules.d/*.conf"
+        ]
+    )
+    httpd_conf_scl_httpd24 = glob_file(
+        [
+            "/opt/rh/httpd24/root/etc/httpd/conf/httpd.conf",
+            "/opt/rh/httpd24/root/etc/httpd/conf.d/*.conf",
+            "/opt/rh/httpd24/root/etc/httpd/conf.d/*/*.conf",
+            "/opt/rh/httpd24/root/etc/httpd/conf.modules.d/*.conf"
+        ]
+    )
+    httpd_conf_scl_jbcs_httpd24 = glob_file(
+        [
+            "/opt/rh/jbcs-httpd24/root/etc/httpd/conf/httpd.conf",
+            "/opt/rh/jbcs-httpd24/root/etc/httpd/conf.d/*.conf",
+            "/opt/rh/jbcs-httpd24/root/etc/httpd/conf.d/*/*.conf",
+            "/opt/rh/jbcs-httpd24/root/etc/httpd/conf.modules.d/*.conf"
+        ]
+    )
     httpd_error_log = simple_file("var/log/httpd/error_log")
+    httpd24_httpd_error_log = simple_file("/opt/rh/httpd24/root/etc/httpd/logs/error_log")
+    jbcs_httpd24_httpd_error_log = simple_file("/opt/rh/jbcs-httpd24/root/etc/httpd/logs/error_log")
     httpd_pid = simple_command("/usr/bin/pgrep -o httpd")
     httpd_limits = foreach_collect(httpd_pid, "/proc/%s/limits")
     virt_uuid_facts = simple_file("/etc/rhsm/facts/virt_uuid.facts")
@@ -281,6 +386,29 @@ class DefaultSpecs(Specs):
         # Running multiple httpd instances on RHEL is supported
         # https://access.redhat.com/solutions/21680
         return list(ps_httpds)
+
+    @datasource(Mount)
+    def httpd_on_nfs(broker):
+        import json
+        mnt = broker[Mount]
+        mps = mnt.search(mount_type='nfs4')
+        # get nfs 4.0 mount points
+        nfs_mounts = [m.mount_point for m in mps if m['mount_options'].get("vers") == "4.0"]
+        if nfs_mounts:
+            # get all httpd ps
+            httpd_pids = broker[HostContext].shell_out("pgrep httpd")
+            if httpd_pids:
+                open_nfs_files = 0
+                lsof_cmds = ["lsof -p {}".format(pid) for pid in httpd_pids if pid]
+                # maybe there are thousands open files
+                httpd_open_files = broker[HostContext].shell_out(lsof_cmds)
+                for line in httpd_open_files:
+                    items = line.split()
+                    if len(items) > 8 and items[8].startswith(tuple(nfs_mounts)):
+                        open_nfs_files += 1
+                result_dict = {"http_ids": httpd_pids, "nfs_mounts": nfs_mounts, "open_nfs_files": open_nfs_files}
+                return DatasourceProvider(content=json.dumps(result_dict), relative_path="httpd_open_nfsV4_files")
+        raise SkipComponent()
 
     httpd_M = foreach_execute(httpd_cmd, "%s -M")
     httpd_ssl_access_log = simple_file("/var/log/httpd/ssl_access_log")
@@ -323,6 +451,8 @@ class DefaultSpecs(Specs):
     ip6tables_permanent = simple_file("etc/sysconfig/ip6tables")
     ipv4_neigh = simple_command("/sbin/ip -4 neighbor show nud all")
     ipv6_neigh = simple_command("/sbin/ip -6 neighbor show nud all")
+    ironic_inspector_log = simple_file("/var/log/ironic-inspector/ironic-inspector.log")
+    ironic_conf = first_file(["/var/lib/config-data/puppet-generated/ironic/etc/ironic/ironic.conf", "/etc/ironic/ironic.conf"])
     iscsiadm_m_session = simple_command("/usr/sbin/iscsiadm -m session")
     katello_service_status = simple_command("/usr/bin/katello-service status")
     kdump_conf = simple_file("/etc/kdump.conf")
@@ -333,7 +463,7 @@ class DefaultSpecs(Specs):
     keystone_crontab = simple_command("/usr/bin/crontab -l -u keystone")
     keystone_crontab_container = simple_command("docker exec keystone_cron /usr/bin/crontab -l -u keystone")
     keystone_log = first_file(["/var/log/containers/keystone/keystone.log", "/var/log/keystone/keystone.log"])
-    krb5 = glob_file([r"etc/krb5.conf", r"etc/krb5.conf.d/*.conf"])
+    krb5 = glob_file([r"etc/krb5.conf", r"etc/krb5.conf.d/*"])
     ksmstate = simple_file("/sys/kernel/mm/ksm/run")
     kubepods_cpu_quota = glob_file("/sys/fs/cgroup/cpu/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod[a-f0-9_]*.slice/cpu.cfs_quota_us")
     last_upload_globs = ["/etc/redhat-access-insights/.lastupload", "/etc/insights-client/.lastupload"]
@@ -349,6 +479,7 @@ class DefaultSpecs(Specs):
     lsblk = simple_command("/bin/lsblk")
     lsblk_pairs = simple_command("/bin/lsblk -P -o NAME,KNAME,MAJ:MIN,FSTYPE,MOUNTPOINT,LABEL,UUID,RA,RO,RM,MODEL,SIZE,STATE,OWNER,GROUP,MODE,ALIGNMENT,MIN-IO,OPT-IO,PHY-SEC,LOG-SEC,ROTA,SCHED,RQ-SIZE,TYPE,DISC-ALN,DISC-GRAN,DISC-MAX,DISC-ZERO")
     lscpu = simple_command("/usr/bin/lscpu")
+    lsinitrd = simple_command("/usr/bin/lsinitrd")
     lsinitrd_lvm_conf = first_of([
                                  simple_command("/sbin/lsinitrd -f /etc/lvm/lvm.conf"),
                                  simple_command("/usr/bin/lsinitrd -f /etc/lvm/lvm.conf")
@@ -365,12 +496,16 @@ class DefaultSpecs(Specs):
     ls_etc = simple_command("/bin/ls -lanR /etc")
     ls_lib_firmware = simple_command("/bin/ls -lanR /lib/firmware")
     ls_ocp_cni_openshift_sdn = simple_command("/bin/ls -l /var/lib/cni/networks/openshift-sdn")
+    ls_origin_local_volumes_pods = simple_command("/bin/ls -l /var/lib/origin/openshift.local.volumes/pods")
+    ls_run_systemd_generator = simple_command("/bin/ls -lan /run/systemd/generator")
     ls_sys_firmware = simple_command("/bin/ls -lanR /sys/firmware")
     ls_var_lib_mongodb = simple_command("/bin/ls -la /var/lib/mongodb")
     ls_R_var_lib_nova_instances = simple_command("/bin/ls -laR /var/lib/nova/instances")
     ls_var_lib_nova_instances = simple_command("/bin/ls -laRZ /var/lib/nova/instances")
+    ls_var_opt_mssql = simple_command("/bin/ls -ld /var/opt/mssql")
     ls_usr_sbin = simple_command("/bin/ls -ln /usr/sbin")
     ls_var_log = simple_command("/bin/ls -la /var/log /var/log/audit")
+    ls_var_opt_mssql_log = simple_command("/bin/ls -la /var/opt/mssql/log")
     ls_var_spool_clientmq = simple_command("/bin/ls -ln /var/spool/clientmqueue")
     ls_var_tmp = simple_command("/bin/ls -ln /var/tmp")
     ls_var_run = simple_command("/bin/ls -lnL /var/run")
@@ -387,12 +522,29 @@ class DefaultSpecs(Specs):
     manila_conf = first_file(["/var/lib/config-data/puppet-generated/manila/etc/manila/manila.conf", "/etc/manila/manila.conf"])
     mariadb_log = simple_file("/var/log/mariadb/mariadb.log")
     max_uid = simple_command("/bin/awk -F':' '{ if($3 > max) max = $3 } END { print max }' /etc/passwd")
+    md5chk_files = foreach_execute(
+        ["/etc/pki/product/69.pem", "/etc/pki/product-default/69.pem", "/usr/lib/libsoftokn3.so", "/usr/lib64/libsoftokn3.so", "/usr/lib/libfreeblpriv3.so", "/usr/lib64/libfreeblpriv3.so"],
+        "/usr/bin/md5sum %s")
     mdstat = simple_file("/proc/mdstat")
     meminfo = first_file(["/proc/meminfo", "/meminfo"])
     messages = simple_file("/var/log/messages")
     metadata_json = simple_file("metadata.json", context=ClusterArchiveContext, kind=RawFileProvider)
-    mlx4_port = simple_command("/usr/bin/find /sys/bus/pci/devices/*/mlx4_port[0-9] -print -exec cat {} \;")
+    mistral_executor_log = simple_file("/var/log/mistral/executor.log")
+    mlx4_port = glob_file("/sys/bus/pci/devices/*/mlx4_port[0-9]")
     modinfo_i40e = simple_command("/sbin/modinfo i40e")
+    modinfo_igb = simple_command("/sbin/modinfo igb")
+    modinfo_ixgbe = simple_command("/sbin/modinfo ixgbe")
+    modinfo_veth = simple_command("/sbin/modinfo veth")
+    modinfo_vmxnet3 = simple_command("/sbin/modinfo vmxnet3")
+
+    @datasource(lsmod, context=HostContext)
+    def lsmod_only_names(broker):
+        lsmod = broker[DefaultSpecs.lsmod].content
+        # skip the title
+        return [line.split()[0] for line in lsmod[1:] if line.strip()]
+
+    modinfo = foreach_execute(lsmod_only_names, "modinfo %s")
+
     modprobe = glob_file(["/etc/modprobe.conf", "/etc/modprobe.d/*.conf"])
     sysconfig_mongod = glob_file([
                                  "etc/sysconfig/mongod",
@@ -404,12 +556,15 @@ class DefaultSpecs(Specs):
                             "/etc/opt/rh/rh-mongodb26/mongod.conf"
                             ])
     mount = simple_command("/bin/mount")
+    mounts = simple_file("/proc/mounts")
+    mssql_conf = simple_file("/var/opt/mssql/mssql.conf")
     multicast_querier = simple_command("/usr/bin/find /sys/devices/virtual/net/ -name multicast_querier -print -exec cat {} \;")
     multipath_conf = simple_file("/etc/multipath.conf")
     multipath_conf_initramfs = simple_command("/bin/lsinitrd -f /etc/multipath.conf")
     multipath__v4__ll = simple_command("/sbin/multipath -v4 -ll")
     mysqladmin_vars = simple_command("/bin/mysqladmin variables")
     mysql_log = glob_file([
+                          "/var/log/mysql/mysqld.log",
                           "/var/log/mysql.log",
                           "/var/opt/rh/rh-mysql*/log/mysql/mysqld.log"
                           ])
@@ -417,6 +572,7 @@ class DefaultSpecs(Specs):
     mysqld_limits = foreach_collect(mysqld_pid, "/proc/%s/limits")
     named_checkconf_p = simple_command("/usr/sbin/named-checkconf -p")
     namespace = simple_command("/bin/ls /var/run/netns")
+    ip_netns_exec_namespace_lsof = foreach_execute(namespace, "/sbin/ip netns exec %s lsof -i")
     netconsole = simple_file("/etc/sysconfig/netconsole")
     netstat = simple_command("/bin/netstat -neopa")
     netstat_agn = simple_command("/bin/netstat -agn")
@@ -424,10 +580,12 @@ class DefaultSpecs(Specs):
     netstat_s = simple_command("/bin/netstat -s")
     networkmanager_dispatcher_d = glob_file("/etc/NetworkManager/dispatcher.d/*-dhclient")
     neutron_conf = first_file(["/var/lib/config-data/puppet-generated/neutron/etc/neutron/neutron.conf", "/etc/neutron/neutron.conf"])
+    neutron_dhcp_agent_ini = first_file(["/var/lib/config-data/puppet-generated/neutron/etc/neutron/dhcp_agent.ini", "/etc/neutron/dhcp_agent.ini"])
     neutron_l3_agent_ini = first_file(["/var/lib/config-data/puppet-generated/neutron/etc/neutron/l3_agent.ini", "/etc/neutron/l3_agent.ini"])
     neutron_l3_agent_log = simple_file("/var/log/neutron/l3-agent.log")
     neutron_metadata_agent_ini = first_file(["/var/lib/config-data/puppet-generated/neutron/etc/neutron/metadata_agent.ini", "/etc/neutron/metadata_agent.ini"])
     neutron_metadata_agent_log = first_file(["/var/log/containers/neutron/metadata-agent.log", "/var/log/neutron/metadata-agent.log"])
+    neutron_ml2_conf = first_file(["/var/lib/config-data/puppet-generated/neutron/etc/neutron/plugins/ml2/ml2_conf.ini", "/etc/neutron/plugins/ml2/ml2_conf.ini"])
     neutron_ovs_agent_log = first_file(["/var/log/containers/neutron/openvswitch-agent.log", "/var/log/neutron/openvswitch-agent.log"])
     neutron_plugin_ini = first_file(["/var/lib/config-data/puppet-generated/neutron/etc/neutron/plugin.ini", "/etc/neutron/plugin.ini"])
     neutron_server_log = first_file(["/var/log/containers/neutron/server.log", "/var/log/neutron/server.log"])
@@ -435,15 +593,19 @@ class DefaultSpecs(Specs):
     nfs_exports = simple_file("/etc/exports")
     nfs_exports_d = glob_file("/etc/exports.d/*.exports")
     nginx_conf = glob_file([
-                           "/etc/nginx/nginx.conf",
-                           "/opt/rh/nginx*/root/etc/nginx/nginx.conf",
-                           "/etc/opt/rh/rh-nginx*/nginx/nginx.conf"
+                           "/etc/nginx/*.conf", "/etc/nginx/conf.d/*", "/etc/nginx/default.d/*",
+                           "/opt/rh/nginx*/root/etc/nginx/*.conf", "/opt/rh/nginx*/root/etc/nginx/conf.d/*", "/opt/rh/nginx*/root/etc/nginx/default.d/*",
+                           "/etc/opt/rh/rh-nginx*/nginx/*.conf", "/etc/opt/rh/rh-nginx*/nginx/conf.d/*", "/etc/opt/rh/rh-nginx*/nginx/default.d/*"
                            ])
     nmcli_conn_show = simple_command("/usr/bin/nmcli conn show")
     nmcli_dev_show = simple_command("/usr/bin/nmcli dev show")
     nova_api_log = first_file(["/var/log/containers/nova/nova-api.log", "/var/log/nova/nova-api.log"])
     nova_compute_log = first_file(["/var/log/containers/nova/nova-compute.log", "/var/log/nova/nova-compute.log"])
-    nova_conf = first_file(["/var/lib/config-data/puppet-generated/nova/etc/nova/nova.conf", "/etc/nova/nova.conf"])
+    nova_conf = first_file([
+                           "/var/lib/config-data/puppet-generated/nova/etc/nova/nova.conf",
+                           "/var/lib/config-data/puppet-generated/nova_libvirt/etc/nova/nova.conf",
+                           "/etc/nova/nova.conf"
+                           ])
     nova_crontab = simple_command("/usr/bin/crontab -l -u nova")
     nova_crontab_container = simple_command("docker exec nova_api_cron /usr/bin/crontab -l -u nova")
     nova_uid = simple_command("/usr/bin/id -u nova")
@@ -456,6 +618,7 @@ class DefaultSpecs(Specs):
     ntptime = simple_command("/usr/sbin/ntptime")
     numa_cpus = glob_file("/sys/devices/system/node/node[0-9]*/cpulist")
     numeric_user_group_name = simple_command("/bin/grep -c '^[[:digit:]]' /etc/passwd /etc/group")
+    nvme_core_io_timeout = simple_file("/sys/module/nvme_core/parameters/io_timeout")
     oc_get_bc = simple_command("/usr/bin/oc get bc -o yaml --all-namespaces", context=OpenShiftContext)
     oc_get_build = simple_command("/usr/bin/oc get build -o yaml --all-namespaces", context=OpenShiftContext)
     oc_get_clusterrole_with_config = simple_command("/usr/bin/oc get clusterrole --config /etc/origin/master/admin.kubeconfig")
@@ -479,7 +642,11 @@ class DefaultSpecs(Specs):
     odbcinst_ini = simple_file("/etc/odbcinst.ini")
     crt = simple_command("/usr/bin/find /etc/origin/node /etc/origin/master -type f -path '*.crt'")
     openshift_certificates = foreach_execute(crt, "/usr/bin/openssl x509 -noout -enddate -in %s")
+    openshift_fluentd_pid = simple_command("/usr/bin/pgrep -n fluentd")
+    openshift_fluentd_environ = foreach_collect(openshift_fluentd_pid, "/proc/%s/environ")
     openshift_hosts = simple_file("/root/.config/openshift/hosts")
+    openshift_router_pid = simple_command("/usr/bin/pgrep -n openshift-route")
+    openshift_router_environ = foreach_collect(openshift_router_pid, "/proc/%s/environ")
     openvswitch_other_config = simple_command("/usr/bin/ovs-vsctl -t 5 get Open_vSwitch . other_config")
     openvswitch_server_log = simple_file('/var/log/openvswitch/ovsdb-server.log')
     openvswitch_daemon_log = simple_file('/var/log/openvswitch/ovs-vswitchd.log')
@@ -495,30 +662,32 @@ class DefaultSpecs(Specs):
     ovirt_engine_ui_log = simple_file("/var/log/ovirt-engine/ui.log")
     ovirt_engine_boot_log = simple_file("/var/log/ovirt-engine/boot.log")
     ovirt_engine_console_log = simple_file("/var/log/ovirt-engine/console.log")
+    ovs_vsctl_list_br = simple_command("/usr/bin/ovs-vsctl list-br")
+    ovs_appctl_fdb_show_bridge = foreach_execute(ovs_vsctl_list_br, "/usr/bin/ovs-appctl fdb/show %s")
+    ovs_ofctl_dump_flows = foreach_execute(ovs_vsctl_list_br, "/usr/bin/ovs-ofctl dump-flows %s")
+    ovs_vsctl_list_bridge = simple_command("/usr/bin/ovs-vsctl list bridge")
     ovs_vsctl_show = simple_command("/usr/bin/ovs-vsctl show")
     ovs_vswitchd_pid = simple_command("/usr/bin/pgrep -o ovs-vswitchd")
     ovs_vswitchd_limits = foreach_collect(ovs_vswitchd_pid, "/proc/%s/limits")
-    pacemaker_log = simple_file("/var/log/pacemaker.log")
+    pacemaker_log = first_file(["/var/log/pacemaker.log", "/var/log/pacemaker/pacemaker.log"])
+    pci_rport_target_disk_paths = simple_command("/usr/bin/find /sys/devices/ -maxdepth 10 -mindepth 9 -name stat -type f")
 
     @datasource(ps_auxww, context=HostContext)
     def package_and_java(broker):
         """Command: package_and_java"""
-        ps = broker[DefaultSpecs.ps_auxww].content
-        ctx = broker[HostContext]
-        results = set()
-        for p in ps:
-            p_splits = p.split(None, 10)
-            cmd = p_splits[10].split()[0] if len(p_splits) == 11 else ''
-            which = ctx.shell_out("which {0}".format(cmd)) if 'java' in os.path.basename(cmd) else None
-            resolved = ctx.shell_out("readlink -e {0}".format(which[0])) if which else None
-            pkg = ctx.shell_out("rpm -qf {0}".format(resolved[0])) if resolved else None
-            if cmd and pkg:
-                results.add("{0} {1}".format(cmd, pkg[0]))
-        return results
+        return get_cmd_and_package_in_ps(broker, 'java')
 
     package_provides_java = foreach_execute(package_and_java, "echo %s")
+
+    @datasource(ps_auxww, context=HostContext)
+    def package_and_httpd(broker):
+        """Command: package_and_httpd"""
+        return get_cmd_and_package_in_ps(broker, 'httpd')
+
+    package_provides_httpd = foreach_execute(package_and_httpd, "echo %s")
     pam_conf = simple_file("/etc/pam.conf")
     parted__l = simple_command("/sbin/parted -l -s")
+    partitions = simple_file("/proc/partitions")
     passenger_status = simple_command("/usr/bin/passenger-status")
     password_auth = simple_file("/etc/pam.d/password-auth")
     pcs_config = simple_command("/usr/sbin/pcs config")
@@ -535,8 +704,6 @@ class DefaultSpecs(Specs):
                               glob_file("/database/postgresql-*.log")
                               ])
     puppetserver_config = simple_file("/etc/sysconfig/puppetserver")
-    md5chk_files = simple_command("/usr/bin/md5sum /dev/null /etc/pki/{product,product-default}/69.pem")
-    prelink_orig_md5 = None
     prev_uploader_log = simple_file("var/log/redhat-access-insights/redhat-access-insights.log.1")
     proc_snmp_ipv4 = simple_file("proc/net/snmp")
     proc_snmp_ipv6 = simple_file("proc/net/snmp6")
@@ -560,8 +727,31 @@ class DefaultSpecs(Specs):
     rabbitmq_startup_log = simple_file("/var/log/rabbitmq/startup_log")
     rabbitmq_users = simple_command("/usr/sbin/rabbitmqctl list_users")
     rc_local = simple_file("/etc/rc.d/rc.local")
+    rdma_conf = simple_file("/etc/rdma/rdma.conf")
     redhat_release = simple_file("/etc/redhat-release")
     resolv_conf = simple_file("/etc/resolv.conf")
+
+    @datasource(HostContext)
+    def rhev_data_center(broker):
+        import json
+        root = broker[HostContext].root
+        relative_path = "rhev/data-center"
+        path = os.path.join(root, relative_path)
+        bad_apples = []
+        for dirpath, dirnames, filenames in os.walk(path):
+            for p in dirnames + filenames:
+                tmp = os.path.join(dirpath, p)
+                try:
+                    name, group = get_owner(tmp)
+                    good = ("vdsm", "kvm")
+                    if (name, group) != good:
+                        bad_apples.append({"name": name, "group": group, "path": tmp})
+                except:
+                    logger.error(tmp)
+        if bad_apples:
+            return DatasourceProvider(content=json.dumps(bad_apples), relative_path=relative_path)
+        raise SkipComponent()
+
     rhv_log_collector_analyzer = simple_command("rhv-log-collector-analyzer --json")
     rhn_charsets = simple_command("/usr/bin/rhn-charsets")
     rhn_conf = first_file(["/etc/rhn/rhn.conf", "/conf/rhn/rhn/rhn.conf"])
@@ -581,44 +771,65 @@ class DefaultSpecs(Specs):
     rhsm_log = simple_file("/var/log/rhsm/rhsm.log")
     root_crontab = simple_command("/usr/bin/crontab -l -u root")
     route = simple_command("/sbin/route -n")
-    rpm_V_packages = simple_command("/usr/bin/rpm -V coreutils procps procps-ng shadow-utils passwd sudo", keep_rc=True)
+    rpm_V_packages = simple_command("/bin/rpm -V coreutils procps procps-ng shadow-utils passwd sudo", keep_rc=True)
     rsyslog_conf = simple_file("/etc/rsyslog.conf")
     samba = simple_file("/etc/samba/smb.conf")
-    saphostctl_listinstances = simple_command("/usr/sap/hostctrl/exe/saphostctrl -function ListInstances")
+    saphostctrl_listinstances = simple_command("/usr/sap/hostctrl/exe/saphostctrl -function ListInstances")
 
-    @datasource(saphostctl_listinstances, hostname, context=HostContext)
-    def sap_hana_sid(broker):
+    @datasource(saphostctrl_listinstances, hostname)
+    def sap_sid_nr(broker):
         """
-        Command: Get the SID for running "HDB version".
+        Get the SID and Instance Number
 
-        Typical output of saphostctl_listinstances::
+        Typical output of saphostctrl_listinstances::
         # /usr/sap/hostctrl/exe/saphostctrl -function ListInstances
         Inst Info : SR1 - 01 - liuxc-rhel7-hana-ent - 749, patch 418, changelist 1816226
 
+        Returns:
+            (list): List of tuple of SID and Instance Number.
+
         """
-        hana_ins = broker[DefaultSpecs.saphostctl_listinstances].content
+        insts = broker[DefaultSpecs.saphostctrl_listinstances].content
         hn = broker[DefaultSpecs.hostname].content[0].split('.')[0].strip()
         results = set()
-        for ins in hana_ins:
+        for ins in insts:
             ins_splits = ins.split(' - ')
+            # Local Instance
             if ins_splits[2].strip() == hn:
-                results.add(ins_splits[0].split()[-1].lower())
+                # (sid, nr)
+                results.add((ins_splits[0].split()[-1].lower(), ins_splits[1].strip()))
         return list(results)
 
-    sap_hdb_version = foreach_execute(sap_hana_sid, "/usr/bin/sudo -iu %sadm HDB version", keep_rc=True)
+    @datasource(sap_sid_nr)
+    def sap_sid(broker):
+        """
+        Get the SID
+
+        Returns:
+            (list): List of SID.
+
+        """
+        return list(set(sn[0] for sn in broker[DefaultSpecs.sap_sid_nr]))
+
+    sap_hdb_version = foreach_execute(sap_sid, "/usr/bin/sudo -iu %sadm HDB version", keep_rc=True)
     sap_host_profile = simple_file("/usr/sap/hostctrl/exe/host_profile")
+    sapcontrol_getsystemupdatelist = foreach_execute(sap_sid_nr, "/usr/bin/sudo -iu %sadm sapcontrol -nr %s -function GetSystemUpdateList", keep_rc=True)
     saphostctl_getcimobject_sapinstance = simple_command("/usr/sap/hostctrl/exe/saphostctrl -function GetCIMObject -enuminstances SAPInstance")
     saphostexec_status = simple_command("/usr/sap/hostctrl/exe/saphostexec -status")
     saphostexec_version = simple_command("/usr/sap/hostctrl/exe/saphostexec -version")
+    sat5_insights_properties = simple_file("/etc/redhat-access/redhat-access-insights.properties")
     satellite_version_rb = simple_file("/usr/share/foreman/lib/satellite/version.rb")
     block_devices = listdir("/sys/block")
     scheduler = foreach_collect(block_devices, "/sys/block/%s/queue/scheduler")
     scsi = simple_file("/proc/scsi/scsi")
     scsi_eh_deadline = glob_file('/sys/class/scsi_host/host[0-9]*/eh_deadline')
     scsi_fwver = glob_file('/sys/class/scsi_host/host[0-9]*/fwrev')
+    sctp_asc = simple_file('/proc/net/sctp/assocs')
+    sctp_eps = simple_file('/proc/net/sctp/eps')
     secure = simple_file("/var/log/secure")
     selinux_config = simple_file("/etc/selinux/config")
     sestatus = simple_command("/usr/sbin/sestatus -b")
+    setup_named_chroot = simple_file("/usr/libexec/setup-named-chroot.sh")
 
     @datasource(HostContext)
     def block(broker):
@@ -637,14 +848,15 @@ class DefaultSpecs(Specs):
     ss = simple_command("/usr/sbin/ss -tupna")
     ssh_config = simple_file("/etc/ssh/ssh_config")
     ssh_foreman_config = simple_file("/usr/share/foreman/.ssh/ssh_config")
+    ssh_foreman_proxy_config = simple_file("/usr/share/foreman-proxy/.ssh/ssh_config")
     sshd_config = simple_file("/etc/ssh/sshd_config")
     sshd_config_perms = simple_command("/bin/ls -l /etc/ssh/sshd_config")
     sssd_config = simple_file("/etc/sssd/sssd.conf")
     subscription_manager_id = simple_command("/usr/bin/subscription-manager identity")
-    subscription_manager_list_consumed = simple_command('/usr/bin/subscription-manager list --consumed')
-    subscription_manager_list_installed = simple_command('/usr/bin/subscription-manager list --installed')
+    subscription_manager_installed_product_ids = simple_command("/usr/bin/find /etc/pki/product-default/ /etc/pki/product/ -name '*pem' -exec rct cat-cert --no-content '{}' \;")
     subscription_manager_release_show = simple_command('/usr/bin/subscription-manager release --show')
-    subscription_manager_repos_list_enabled = simple_command('/usr/bin/subscription-manager repos --list-enabled')
+    swift_conf = first_file(["/var/lib/config-data/puppet-generated/swift/etc/swift/swift.conf", "/etc/swift/swift.conf"])
+    swift_log = first_file(["/var/log/containers/swift/swift.log", "/var/log/swift/swift.log"])
     swift_object_expirer_conf = first_file(["/var/lib/config-data/puppet-generated/swift/etc/swift/object-expirer.conf", "/etc/swift/object-expirer.conf"])
     swift_proxy_server_conf = first_file(["/var/lib/config-data/puppet-generated/swift/etc/swift/proxy-server.conf", "/etc/swift/proxy-server.conf"])
     sysconfig_chronyd = simple_file("/etc/sysconfig/chronyd")
@@ -653,14 +865,19 @@ class DefaultSpecs(Specs):
     sysconfig_kdump = simple_file("etc/sysconfig/kdump")
     sysconfig_libvirt_guests = simple_file("etc/sysconfig/libvirt-guests")
     sysconfig_memcached = first_file(["/var/lib/config-data/puppet-generated/memcached/etc/sysconfig/memcached", "/etc/sysconfig/memcached"])
+    sysconfig_network = simple_file("etc/sysconfig/network")
     sysconfig_ntpd = simple_file("/etc/sysconfig/ntpd")
     sysconfig_prelink = simple_file("/etc/sysconfig/prelink")
+    sysconfig_sshd = simple_file("/etc/sysconfig/sshd")
     sysconfig_virt_who = simple_file("/etc/sysconfig/virt-who")
     sysctl = simple_command("/sbin/sysctl -a")
     sysctl_conf = simple_file("/etc/sysctl.conf")
-    sysctl_conf_initramfs = simple_command("/bin/lsinitrd /boot/initramfs-*kdump.img -f /etc/sysctl.conf /etc/sysctl.d/*.conf")
+    sysctl_conf_files = listdir("/boot/initramfs-*kdump.img")
+    sysctl_conf_initramfs = foreach_execute(sysctl_conf_files, "/bin/lsinitrd /boot/%s -f /etc/sysctl.conf /etc/sysctl.d/*.conf")
+    systemctl_cat_rpcbind_socket = simple_command("/bin/systemctl cat rpcbind.socket")
     systemctl_cinder_volume = simple_command("/bin/systemctl show openstack-cinder-volume")
     systemctl_httpd = simple_command("/bin/systemctl show httpd")
+    systemctl_nginx = simple_command("/bin/systemctl show nginx")
     systemctl_list_unit_files = simple_command("/bin/systemctl list-unit-files")
     systemctl_list_units = simple_command("/bin/systemctl list-units")
     systemctl_mariadb = simple_command("/bin/systemctl show mariadb")
@@ -670,15 +887,17 @@ class DefaultSpecs(Specs):
     systemctl_qpidd = simple_command("/bin/systemctl show qpidd")
     systemctl_qdrouterd = simple_command("/bin/systemctl show qdrouterd")
     systemctl_smartpdc = simple_command("/bin/systemctl show smart_proxy_dynflow_core")
-    systemd_docker = simple_file("/usr/lib/systemd/system/docker.service")
+    systemd_docker = simple_command("/usr/bin/systemctl cat docker.service")
     systemd_logind_conf = simple_file("/etc/systemd/logind.conf")
-    systemd_openshift_node = simple_file("/usr/lib/systemd/system/atomic-openshift-node.service")
+    systemd_openshift_node = simple_command("/usr/bin/systemctl cat atomic-openshift-node.service")
     systemd_system_conf = simple_file("/etc/systemd/system.conf")
+    systemd_system_origin_accounting = simple_file("/etc/systemd/system.conf.d/origin-accounting.conf")
     systemid = first_of([
         simple_file("/etc/sysconfig/rhn/systemid"),
         simple_file("/conf/rhn/sysconfig/rhn/systemid")
     ])
     systool_b_scsi_v = simple_command("/bin/systool -b scsi -v")
+    teamdctl_config_dump = foreach_execute(ethernet_interfaces, "/usr/bin/teamdctl %s config dump")
     teamdctl_state_dump = foreach_execute(ethernet_interfaces, "/usr/bin/teamdctl %s state dump")
     thp_use_zero_page = simple_file("/sys/kernel/mm/transparent_hugepage/use_zero_page")
     thp_enabled = simple_file("/sys/kernel/mm/transparent_hugepage/enabled")
@@ -713,6 +932,7 @@ class DefaultSpecs(Specs):
     uploader_log = simple_file("/var/log/redhat-access-insights/redhat-access-insights.log")
     uptime = simple_command("/usr/bin/uptime")
     usr_journald_conf_d = glob_file(r"usr/lib/systemd/journald.conf.d/*.conf")  # note that etc_journald.conf.d also exists
+    vdo_status = simple_command("/usr/bin/vdo status")
     vgdisplay = simple_command("/sbin/vgdisplay")
     vdsm_conf = simple_file("etc/vdsm/vdsm.conf")
     vdsm_id = simple_file("etc/vdsm/vdsm.id")
@@ -744,6 +964,7 @@ class DefaultSpecs(Specs):
     xfs_info = foreach_execute(xfs_mounts, "/usr/sbin/xfs_info %s")
     xinetd_conf = glob_file(["/etc/xinetd.conf", "/etc/xinetd.d/*"])
     yum_conf = simple_file("/etc/yum.conf")
+    yum_list_installed = simple_command("yum -C --noplugins list installed")
     yum_log = simple_file("/var/log/yum.log")
     yum_repolist = simple_command("/usr/bin/yum -C repolist")
     yum_repos_d = glob_file("/etc/yum.repos.d/*")
@@ -751,15 +972,15 @@ class DefaultSpecs(Specs):
 
     rpm_format = format_rpm()
 
-    host_installed_rpms = simple_command("/usr/bin/rpm -qa --qf '%s'" % rpm_format, context=HostContext)
+    host_installed_rpms = simple_command("/bin/rpm -qa --qf '%s'" % rpm_format, context=HostContext)
 
     @datasource(DockerImageContext)
     def docker_installed_rpms(broker):
-        """ Command: /usr/bin/rpm -qa --root `%s` --qf `%s`"""
+        """ Command: /bin/rpm -qa --root `%s` --qf `%s`"""
         ctx = broker[DockerImageContext]
         root = ctx.root
         fmt = DefaultSpecs.rpm_format
-        cmd = "/usr/bin/rpm -qa --root %s --qf '%s'" % (root, fmt)
+        cmd = "/bin/rpm -qa --root %s --qf '%s'" % (root, fmt)
         result = ctx.shell_out(cmd)
         return CommandOutputProvider(cmd, ctx, content=result)
 

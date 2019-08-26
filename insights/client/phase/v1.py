@@ -11,8 +11,9 @@ from insights.client import InsightsClient
 from insights.client.config import InsightsConfig
 from insights.client.constants import InsightsConstants as constants
 from insights.client.support import InsightsSupport
-from insights.client.utilities import validate_remove_file
+from insights.client.utilities import validate_remove_file, print_egg_versions
 from insights.client.schedule import get_scheduler
+from insights.client.apps.compliance import ComplianceClient
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ def pre_update(client, config):
         if not config.register:
             sys.exit(constants.sig_kill_ok)
 
+    # delete someday
     if config.analyze_container:
         logger.debug('Not scanning host.')
         logger.debug('Scanning image ID, tar file, or mountpoint.')
@@ -124,60 +126,142 @@ def update(client, config):
 
 @phase
 def post_update(client, config):
+    # create a machine id first thing. we'll need it for all uploads
+    logger.debug('Machine ID: %s', client.get_machine_id())
     logger.debug("CONFIG: %s", config)
-    if config.status:
-        reg_check = client.get_registration_status()
-        for msg in reg_check['messages']:
-            logger.info(msg)
-        sys.exit(constants.sig_kill_ok)
+    print_egg_versions()
+    # -------delete everything below this line-------
+    if config.legacy_upload:
+        if config.status:
+            reg_check = client.get_registration_status()
+            for msg in reg_check['messages']:
+                logger.info(msg)
+            if reg_check['status']:
+                sys.exit(constants.sig_kill_ok)
+            else:
+                sys.exit(constants.sig_kill_bad)
 
-    # put this first to avoid conflicts with register
-    if config.unregister:
-        if client.unregister():
-            sys.exit(constants.sig_kill_ok)
-        else:
+        # put this first to avoid conflicts with register
+        if config.unregister:
+            if client.unregister():
+                sys.exit(constants.sig_kill_ok)
+            else:
+                sys.exit(constants.sig_kill_bad)
+
+        if config.offline:
+            logger.debug('Running client in offline mode. Bypassing registration.')
+            return
+
+        if config.analyze_container:
+            logger.debug(
+                'Running client in container mode. Bypassing registration.')
+            return
+
+        if config.display_name and not config.register:
+            # setting display name independent of registration
+            if client.set_display_name(config.display_name):
+                if 'display_name' in config._cli_opts:
+                    # only exit on success if it was invoked from command line
+                    sys.exit(constants.sig_kill_ok)
+            else:
+                sys.exit(constants.sig_kill_bad)
+
+        reg = client.register()
+        if reg is None:
+            # API unreachable
+            logger.info('Running connection test...')
+            client.test_connection()
             sys.exit(constants.sig_kill_bad)
+        elif reg is False:
+            # unregistered
+            sys.exit(constants.sig_kill_bad)
+        if config.register:
+            if (not config.disable_schedule and
+               get_scheduler(config).set_daily()):
+                logger.info('Automatic scheduling for Insights has been enabled.')
+        return
+    # -------delete everything above this line-------
 
     if config.offline:
         logger.debug('Running client in offline mode. Bypassing registration.')
         return
 
-    if config.analyze_container:
-        logger.debug(
-            'Running client in container mode. Bypassing registration.')
+    # --payload short circuits registration check
+    if config.payload:
+        logger.debug('Uploading a specified archive. Bypassing registration.')
         return
 
-    if config.display_name and not config.register:
-        # setting display name independent of registration
-        if client.set_display_name(config.display_name):
-            if 'display_name' in config._cli_opts:
-                # only exit on success if it was invoked from command line
-                sys.exit(constants.sig_kill_ok)
+    # check registration status before anything else
+    reg_check = client.get_registration_status()
+    if reg_check is None:
+        sys.exit(constants.sig_kill_bad)
+
+    # --status
+    if config.status:
+        if reg_check:
+            logger.info('This host is registered.')
+            sys.exit(constants.sig_kill_ok)
         else:
+            logger.info('This host is unregistered.')
             sys.exit(constants.sig_kill_bad)
 
-    reg = client.register()
-    if reg is None:
-        # API unreachable
-        logger.info('Running connection test...')
-        client.test_connection()
+    # put this first to avoid conflicts with register
+    if config.unregister:
+        if reg_check:
+            logger.info('Unregistering this host from Insights.')
+            if client.unregister():
+                get_scheduler(config).remove_scheduling()
+                sys.exit(constants.sig_kill_ok)
+            else:
+                sys.exit(constants.sig_kill_bad)
+        else:
+            logger.info('This host is not registered, unregistration is not applicable.')
+            sys.exit(constants.sig_kill_bad)
+
+    # halt here if unregistered
+    if not reg_check and not config.register:
+        logger.info('This host has not been registered. '
+                    'Use --register to register this host.')
         sys.exit(constants.sig_kill_bad)
-    elif reg is False:
-        # unregistered
-        sys.exit(constants.sig_kill_bad)
+
+    # --force-reregister, clear machine-id
+    if config.reregister:
+        reg_check = False
+        client.clear_local_registration()
+
+    # --register was called
     if config.register:
+        # don't actually need to make a call to register() since
+        #   system creation and upload are a single event on the platform
+        if reg_check:
+            logger.info('This host has already been registered.')
         if (not config.disable_schedule and
            get_scheduler(config).set_daily()):
             logger.info('Automatic scheduling for Insights has been enabled.')
 
+    # set --display-name independent of register
+    # only do this if set from the CLI. normally display_name is sent on upload
+    if 'display_name' in config._cli_opts and not config.register:
+        if client.set_display_name(config.display_name):
+            sys.exit(constants.sig_kill_ok)
+        else:
+            sys.exit(constants.sig_kill_bad)
+
 
 @phase
 def collect_and_output(client, config):
+    # --compliance was called
+    if config.compliance:
+        config.payload, config.content_type = ComplianceClient(config).oscap_scan()
     if config.payload:
         insights_archive = config.payload
     else:
-        insights_archive = client.collect()
-        config.content_type = 'application/vnd.redhat.advisor.test+tgz'
+        try:
+            insights_archive = client.collect()
+        except RuntimeError as e:
+            logger.error(e)
+            sys.exit(constants.sig_kill_bad)
+        config.content_type = 'application/vnd.redhat.advisor.collection+tgz'
 
     if not insights_archive:
         sys.exit(constants.sig_kill_bad)

@@ -1,4 +1,5 @@
 import os
+import sys
 from setuptools import setup, find_packages
 
 __here__ = os.path.dirname(os.path.abspath(__file__))
@@ -13,7 +14,10 @@ entry_points = {
     'console_scripts': [
         'insights-collect = insights.collect:main',
         'insights-run = insights:main',
+        'insights = insights.command_parser:main',
         'insights-cat = insights.tools.cat:main',
+        'insights-dupkeycheck = insights.tools.dupkeycheck:main',
+        'insights-inspect = insights.tools.insights_inspect:main',
         'insights-info = insights.tools.query:main',
         'gen_api = insights.tools.generate_api_config:main',
         'insights-perf = insights.tools.perf:main',
@@ -23,15 +27,21 @@ entry_points = {
 }
 
 runtime = set([
-    'pyyaml>=3.10,<=3.13',
     'six',
     'requests',
     'redis',
     'cachecontrol',
     'cachecontrol[redis]',
     'cachecontrol[filecache]',
+    'defusedxml',
     'lockfile',
+    'jinja2',
 ])
+
+if (sys.version_info < (2, 7)):
+    runtime.add('pyyaml>=3.10,<=3.13')
+else:
+    runtime.add('pyyaml')
 
 
 def maybe_require(pkg):
@@ -46,8 +56,7 @@ maybe_require("argparse")
 
 
 client = set([
-    'requests',
-    'pyOpenSSL',
+    'requests'
 ])
 
 develop = set([
@@ -74,8 +83,11 @@ testing = set([
 cluster = set([
     'ansible',
     'pandas',
-    'jinja2',
     'colorama',
+])
+
+openshift = set([
+    'openshift'
 ])
 
 linting = set([
@@ -107,8 +119,11 @@ if __name__ == "__main__":
         license='Apache 2.0',
         extras_require={
             'develop': list(runtime | develop | client | docs | linting | testing | cluster),
+            'develop26': list(runtime | develop | client | linting | testing | cluster),
             'client': list(runtime | client),
+            'client-develop': list(runtime | develop | client | linting | testing),
             'cluster': list(runtime | cluster),
+            'openshift': list(runtime | openshift),
             'optional': list(optional),
             'docs': list(docs),
             'linting': list(linting | client),

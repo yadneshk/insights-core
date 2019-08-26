@@ -11,7 +11,7 @@ from tempfile import NamedTemporaryFile
 
 from insights import collect
 from ..contrib.soscleaner import SOSCleaner
-from .utilities import generate_machine_id
+from .utilities import generate_machine_id, get_version_info
 from .constants import InsightsConstants as constants
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,7 @@ class DataCollector(object):
             fresh = cleaner.clean_report(clean_opts, self.archive.archive_dir)
             if clean_opts.keyword_file is not None:
                 os.remove(clean_opts.keyword_file.name)
+                logger.warn("WARNING: Skipping keywords found in remove.conf")
             return fresh[0]
         return self.archive.create_tar_file()
 

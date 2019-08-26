@@ -64,7 +64,9 @@ is executed against each rule.  At a high level:
 - The outputs of all rules is returned, along with other various bits
   of metadata, to the client, depending on what invoked the rules
   framework.
-  
+
+.. _context-label:
+
 Contexts
 ========
 
@@ -266,8 +268,10 @@ Defining Parsers
 There are a couple things that make a function a parser:
 
 1. The function is decorated with the ``@parser`` decorator
-2. The function takes one parameter, which is expected to be of type
-   ``Context``.
+2. The function can take multiple parameters, the first is always
+   expected to be of type ``Context``.
+   Any additional parameters will normally represent  a ``component``
+   with a sole purpose of determining if the parser will fire.
 
 Registration and Symbolic Names
 -------------------------------
@@ -298,11 +302,17 @@ to determine what information is available for processing in Insights.
 Parser Contexts
 ---------------
 
-Each parser takes exactly one parameter, which is expected to be of type
-``Context``.  All information available to a parser is found in the
+Each parser may take multiple parameters.
+The first is always expected to be of type ``Context``.
+Order is also important and the parameter of type ``Context``
+must always be first.
+All information available to a parser is found in the
 :py:class:`insights.core.context.Context` object.
 Please refer to the Context API documentation
 :py:mod:`insights.core.context` for more details.
+Any additional parameters will not be of type ``Context``
+but will normally represent a ``component`` with a sole
+purpose of determining if the parser will fire.
 
 Parser Outputs
 --------------
@@ -360,17 +370,25 @@ and methods to determine if the criteria is met to trigger the rule.
 Rule Output
 -----------
 
-Rules can return two types of responses:  a rule "hit" or "action", or
-system metadata.
+Rules can return multiple types of responses. If a rule is detecting some
+problem and finds it, it should return ``make_fail``. If it is detecting a
+problem and is sure the problem doesn't exist, it should return ``make_pass``.
+If it wants to return information not associated with a failure or success, it
+should return ``make_info``.
 
-To return a rule "hit", return the result of ``make_response``:
+To return a rule "hit", return the result of ``make_fail``:
 
-.. autoclass:: insights.core.plugins.make_response
+.. autoclass:: insights.core.plugins.make_fail
    :noindex:
 
-To return system metadata, return the result of ``make_metadata``:
+To return a rule success, return the result of ``make_pass``:
 
-.. autoclass:: insights.core.plugins.make_metadata
+.. autoclass:: insights.core.plugins.make_pass
+   :noindex:
+
+To return system info, return the result of ``make_info``:
+
+.. autoclass:: insights.core.plugins.make_info
    :noindex:
 
 Testing

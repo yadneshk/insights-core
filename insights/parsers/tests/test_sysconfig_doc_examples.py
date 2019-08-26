@@ -1,15 +1,17 @@
 from insights.tests import context_wrap
 from insights.parsers import sysconfig
-from insights.parsers.sysconfig import ChronydSysconfig, DockerSysconfig
+from insights.parsers.sysconfig import ChronydSysconfig, DockerSysconfig, DockerSysconfigStorage
 from insights.parsers.sysconfig import HttpdSysconfig, IrqbalanceSysconfig
 from insights.parsers.sysconfig import LibvirtGuestsSysconfig, MemcachedSysconfig
 from insights.parsers.sysconfig import MongodSysconfig, NtpdSysconfig
 from insights.parsers.sysconfig import PrelinkSysconfig, VirtWhoSysconfig
+from insights.parsers.sysconfig import SshdSysconfig
 from insights.parsers.sysconfig import Up2DateSysconfig, PuppetserverSysconfig
 from insights.parsers.sysconfig import NetconsoleSysconfig, ForemanTasksSysconfig
 from insights.parsers.sysconfig import DockerStorageSetupSysconfig, DirsrvSysconfig
 from insights.parsers.sysconfig import CorosyncSysconfig
 from insights.parsers.sysconfig import IfCFGStaticRoute
+from insights.parsers.sysconfig import NetworkSysconfig
 import doctest
 
 
@@ -77,6 +79,21 @@ serverURL[comment]=Remote server URL
 serverURL=https://rhnproxy.glb.tech.markit.partners/XMLRPC
 """.strip()
 
+SSHDSYSCONFIG = """
+# Configuration file for the sshd service.
+
+# The server keys are automatically generated if they are missing.
+# To change the automatic creation, adjust sshd.service options for
+# example using  systemctl enable sshd-keygen@dsa.service  to allow creation
+# of DSA key or  systemctl mask sshd-keygen@rsa.service  to disable RSA key
+# creation.
+
+# System-wide crypto policy:
+# To opt-out, uncomment the following line
+# CRYPTO_POLICY=
+CRYPTO_POLICY=
+""".strip()
+
 PUPPETSERVERCONFIG = """
 USER="puppet"
 GROUP="puppet"
@@ -128,12 +145,24 @@ NETMASK0=255.255.254.0
 GATEWAY0=10.65.223.1
 """.strip()
 
+DOCKER_CONFIG_STORAGE = """
+DOCKER_STORAGE_OPTIONS="--storage-driver devicemapper --storage-opt dm.fs=xfs --storage-opt dm.thinpooldev=/dev/mapper/dockervg-docker--pool --storage-opt dm.use_deferred_removal=true --storage-opt dm.use_deferred_deletion=true"
+""".strip()
+
+NETWORK_SYSCONFIG = """
+NETWORKING=yes
+HOSTNAME=rhel7-box
+GATEWAY=172.31.0.1
+NM_BOND_VLAN_ENABLED=no
+""".strip()
+
 
 def test_sysconfig_doc():
     env = {
             'chronyd_syscfg': ChronydSysconfig(context_wrap(CHRONYDSYSCONFIG)),
             'ntpd_syscfg': NtpdSysconfig(context_wrap(NTPDSYSCONFIG)),
             'docker_syscfg': DockerSysconfig(context_wrap(DOCKERSYSCONFIG)),
+            'docker_syscfg_storage': DockerSysconfigStorage(context_wrap(DOCKER_CONFIG_STORAGE)),
             'httpd_syscfg': HttpdSysconfig(context_wrap(HTTPDSYSCONFIG)),
             'irqb_syscfg': IrqbalanceSysconfig(context_wrap(IRQBALANCESYSCONFIG)),
             'vwho_syscfg': VirtWhoSysconfig(context_wrap(VIRTWHOSYSCONFIG)),
@@ -143,12 +172,14 @@ def test_sysconfig_doc():
             'prelink_syscfg': PrelinkSysconfig(context_wrap(PRELINKSYSCONFIG)),
             'u2d_syscfg': Up2DateSysconfig(context_wrap(UP2DATESYSCONFIG)),
             'netcs_syscfg': NetconsoleSysconfig(context_wrap(NETCONSOLESYSCONFIG)),
+            'sshd_syscfg': SshdSysconfig(context_wrap(SSHDSYSCONFIG)),
             'pps_syscfg': PuppetserverSysconfig(context_wrap(PUPPETSERVERCONFIG)),
             'ft_syscfg': ForemanTasksSysconfig(context_wrap(FOREMANTASKSYSCONFG)),
             'dss_syscfg': DockerStorageSetupSysconfig(context_wrap(DOCKERSTORAGESETUPSYSCONFG)),
             'dirsrv_syscfg': DirsrvSysconfig(context_wrap(DIRSRVSYSCONFG)),
             'cs_syscfg': CorosyncSysconfig(context_wrap(COROSYNCSYSCONFIG)),
             'conn_info': IfCFGStaticRoute(context_wrap(STATIC_ROUTE_1, CONTEXT_PATH_DEVICE_1)),
+            'net_syscfg': NetworkSysconfig(context_wrap(NETWORK_SYSCONFIG))
           }
     failed, total = doctest.testmod(sysconfig, globs=env)
     assert failed == 0

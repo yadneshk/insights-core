@@ -376,8 +376,7 @@ def _import(path, continue_on_error):
     log.debug("Importing %s" % path)
     try:
         return importlib.import_module(path)
-    except Exception as ex:
-        log.exception(ex)
+    except BaseException:
         if not continue_on_error:
             raise
 
@@ -947,7 +946,9 @@ def run(components=None, broker=None):
     for component in run_order(components):
         start = time.time()
         try:
-            if component not in broker and component in DELEGATES and is_enabled(component):
+            if (component not in broker and component in components and
+               component in DELEGATES and
+               is_enabled(component)):
                 log.info("Trying %s" % get_name(component))
                 result = DELEGATES[component].process(broker)
                 broker[component] = result
@@ -961,13 +962,22 @@ def run(components=None, broker=None):
             pass
         except Exception as ex:
             tb = traceback.format_exc()
-            log.warn(tb)
+            log.warning(tb)
             broker.add_exception(component, ex, tb)
         finally:
             broker.exec_times[component] = time.time() - start
             broker.fire_observers(component)
 
     return broker
+
+
+def generate_incremental(components=None, broker=None):
+    components = components or COMPONENTS[GROUPS.single]
+    components = _determine_components(components)
+    seed_broker = broker or Broker()
+    for graph in get_subgraphs(components):
+        broker = Broker(seed_broker)
+        yield (graph, broker)
 
 
 def run_incremental(components=None, broker=None):
@@ -989,9 +999,15 @@ def run_incremental(components=None, broker=None):
     Yields:
         Broker: the broker used to evaluate each subgraph.
     """
-    components = components or COMPONENTS[GROUPS.single]
-    components = _determine_components(components)
-    seed_broker = broker or Broker()
-    for graph in get_subgraphs(components):
-        broker = Broker(seed_broker)
-        yield run(graph, broker=broker)
+    for graph, _broker in generate_incremental(components, broker):
+        yield run(graph, broker=_broker)
+
+
+def run_all(components=None, broker=None, pool=None):
+    if pool:
+        futures = []
+        for graph, _broker in generate_incremental(components, broker):
+            futures.append(pool.submit(run, graph, _broker))
+        return [f.result() for f in futures]
+    else:
+        return list(run_incremental(components=components, broker=broker))

@@ -1,5 +1,6 @@
 import logging
 import os
+from itertools import product
 
 from insights.core import archives
 from insights.core.context import (ClusterArchiveContext,
@@ -19,31 +20,36 @@ def get_all_files(path):
     return all_files
 
 
-def determine_context(common_path, files):
-    if any(f.endswith(archives.COMPRESSION_TYPES) for f in os.listdir(common_path)):
-        return ClusterArchiveContext
+def identify(files):
+    markers = {"insights_archive.txt": SerializedArchiveContext,
+               "insights_commands": HostArchiveContext,
+               "sos_commands": SosArchiveContext,
+               "JBOSS_HOME": JDRContext}
 
-    for f in files:
-        if "insights_archive.txt" in f:
-            return SerializedArchiveContext
-        elif "insights_commands" in f:
-            return HostArchiveContext
-        elif "sos_commands" in f:
-            return SosArchiveContext
-        elif "JBOSS_HOME" in f:
-            return JDRContext
+    for f, m in product(files, markers):
+        if m in f:
+            i = f.find(m)
+            common_path = os.path.dirname(f[:i])
+            ctx = markers[m]
+            return common_path, ctx
 
-    return HostArchiveContext
+    common_path = os.path.dirname(os.path.commonprefix(files))
+    if not common_path:
+        raise archives.InvalidArchive("Unable to determine common path")
+
+    return common_path, HostArchiveContext
 
 
 def create_context(path, context=None):
+    top = os.listdir(path)
+    arc = [os.path.join(path, f) for f in top if f.endswith(archives.COMPRESSION_TYPES)]
+    if arc:
+        return ClusterArchiveContext(path, all_files=arc)
+
     all_files = get_all_files(path)
     if not all_files:
         raise archives.InvalidArchive("No files in archive")
 
-    common_path = os.path.dirname(os.path.commonprefix(all_files))
-    if not common_path:
-        raise archives.InvalidArchive("Unable to determine common path")
-
-    context = context or determine_context(common_path, all_files)
+    common_path, ctx = identify(all_files)
+    context = context or ctx
     return context(common_path, all_files=all_files)

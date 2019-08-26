@@ -1,30 +1,6 @@
 API Documentation
 =================
 
-insights.configtree
--------------------
-
-.. automodule:: insights.configtree
-    :members:
-    :show-inheritance:
-    :undoc-members:
-
-insights.configtree.dictlike
-----------------------------
-
-.. automodule:: insights.configtree.dictlike
-    :members:
-    :show-inheritance:
-    :undoc-members:
-
-insights.configtree.iniconfig
------------------------------
-
-.. automodule:: insights.configtree.iniconfig
-    :members:
-    :show-inheritance:
-    :undoc-members:
-
 insights.core
 -------------
 
@@ -96,6 +72,30 @@ insights.parsers
     :show-inheritance:
     :undoc-members:
 
+insights.parsr
+--------------
+
+.. automodule:: insights.parsr
+    :members:
+    :show-inheritance:
+    :undoc-members:
+
+insights.parsr.query
+--------------------
+
+.. automodule:: insights.parsr.query
+    :members:
+    :show-inheritance:
+    :undoc-members:
+
+insights.parsr.query.boolean
+----------------------------
+
+.. automodule:: insights.parsr.query.boolean
+    :members:
+    :show-inheritance:
+    :undoc-members:
+
 insights.specs
 --------------
 .. automodule:: insights.specs
@@ -141,6 +141,24 @@ insights.tests
 --------------
 
 .. automodule:: insights.tests
+    :members:
+    :show-inheritance:
+    :undoc-members:
+
+insights.tools
+--------------
+
+.. automodule:: insights.tools.cat
+    :members:
+    :show-inheritance:
+    :undoc-members:
+
+.. automodule:: insights.tools.insights_inspect
+    :members:
+    :show-inheritance:
+    :undoc-members:
+
+.. automodule:: insights.tools.query
     :members:
     :show-inheritance:
     :undoc-members:

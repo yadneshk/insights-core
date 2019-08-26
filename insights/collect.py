@@ -8,24 +8,34 @@ runs all datasources in ``insights.specs.Specs`` and
 ``insights.specs.Specs``.
 """
 from __future__ import print_function
+from contextlib import contextmanager
 import argparse
 import logging
 import os
 import tempfile
 import yaml
 
-from collections import defaultdict
 from datetime import datetime
 
-from insights import apply_configs, dr
+from insights import apply_configs, apply_default_enabled, dr
 from insights.core import blacklist
 from insights.core.serde import Hydration
 from insights.util import fs
 from insights.util.subproc import call
 
 SAFE_ENV = {
-    "PATH": os.path.pathsep.join(["/bin", "/usr/bin", "/sbin", "/usr/sbin"])
+    "PATH": os.path.pathsep.join([
+        "/bin",
+        "/usr/bin",
+        "/sbin",
+        "/usr/sbin",
+        "/usr/share/Modules/bin",
+    ]),
+    "LC_ALL": "C",
 }
+
+if "LANG" in os.environ:
+    SAFE_ENV["LANG"] = os.environ["LANG"]
 
 log = logging.getLogger(__name__)
 
@@ -34,61 +44,68 @@ default_manifest = """
 # version is for the format of this file, not its contents.
 version: 0
 
-context:
-    class: insights.core.context.HostContext
-    args:
-        timeout: 10 # timeout in seconds for commands. Doesn't apply to files.
+client:
+    context:
+        class: insights.core.context.HostContext
+        args:
+            timeout: 10 # timeout in seconds for commands. Doesn't apply to files.
 
-# disable everything by default
-# defaults to false if not specified.
-default_component_enabled: false
+    # commands and files to ignore
+    blacklist:
+        files: []
+        commands: []
+        patterns: []
+        keywords: []
 
-# commands and files to ignore
-blacklist:
-    files: []
-    commands: []
-    patterns: []
-    keywords: []
+    # Can be a list of dictionaries with name/enabled fields or a list of strings
+    # where the string is the name and enabled is assumed to be true. Matching is
+    # by prefix, and later entries override previous ones. Persistence for a
+    # component is disabled by default.
+    persist:
+        - name: insights.specs.Specs
+          enabled: true
 
-# packages and modules to load
-packages:
-    - insights.specs.default
+    run_strategy:
+        name: parallel
+        args:
+            max_workers: null
 
-# Can be a list of dictionaries with name/enabled fields or a list of strings
-# where the string is the name and enabled is assumed to be true. Matching is
-# by prefix, and later entries override previous ones. Persistence for a
-# component is disabled by default.
-persist:
-    - name: insights.specs.Specs
-      enabled: true
+plugins:
+    # disable everything by default
+    # defaults to false if not specified.
+    default_component_enabled: false
 
-# configuration of loaded components. names are prefixes, so any component with
-# a fully qualified name that starts with a key will get the associated
-# configuration applied. Can specify timeout, which will apply to command
-# datasources. Can specify metadata, which must be a dictionary and will be
-# merged with the components' default metadata.
-configs:
-    - name: insights.specs.Specs
-      enabled: true
+    # packages and modules to load
+    packages:
+        - insights.specs.default
 
-    - name: insights.specs.default.DefaultSpecs
-      enabled: true
+    # configuration of loaded components. names are prefixes, so any component with
+    # a fully qualified name that starts with a key will get the associated
+    # configuration applied. Can specify timeout, which will apply to command
+    # datasources. Can specify metadata, which must be a dictionary and will be
+    # merged with the components' default metadata.
+    configs:
+        - name: insights.specs.Specs
+          enabled: true
 
-    - name: insights.parsers.hostname
-      enabled: true
+        - name: insights.specs.default.DefaultSpecs
+          enabled: true
 
-    - name: insights.parsers.facter
-      enabled: true
+        - name: insights.parsers.hostname
+          enabled: true
 
-    - name: insights.parsers.systemid
-      enabled: true
+        - name: insights.parsers.facter
+          enabled: true
 
-    - name: insights.combiners.hostname
-      enabled: true
+        - name: insights.parsers.systemid
+          enabled: true
 
-# needed because some specs aren't given names before they're used in DefaultSpecs
-    - name: insights.core.spec_factory
-      enabled: true
+        - name: insights.combiners.hostname
+          enabled: true
+
+    # needed because some specs aren't given names before they're used in DefaultSpecs
+        - name: insights.core.spec_factory
+          enabled: true
 """.strip()
 
 
@@ -100,19 +117,6 @@ def load_manifest(data):
     if not isinstance(doc, dict):
         raise Exception("Manifest didn't result in dict.")
     return doc
-
-
-def apply_default_enabled(default_enabled):
-    """
-    Configures dr and already loaded components with a default enabled
-    value.
-    """
-    for k in dr.ENABLED:
-        dr.ENABLED[k] = default_enabled
-
-    enabled = defaultdict(lambda: default_enabled)
-    enabled.update(dr.ENABLED)
-    dr.ENABLED = enabled
 
 
 def load_packages(pkgs):
@@ -191,6 +195,25 @@ def create_archive(path, remove_path=True):
     return archive_path
 
 
+@contextmanager
+def get_pool(parallel, kwargs):
+    """
+    Yields:
+        a ThreadPoolExecutor if parallel is True and `concurrent.futures` exists.
+        `None` otherwise.
+    """
+
+    if parallel:
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(thread_name_prefix="insights-collector-pool", **kwargs) as pool:
+                yield pool
+        except ImportError:
+            yield None
+    else:
+        yield None
+
+
 def collect(manifest=default_manifest, tmp_path=None, compress=False):
     """
     This is the collection entry point. It accepts a manifest, a temporary
@@ -211,12 +234,17 @@ def collect(manifest=default_manifest, tmp_path=None, compress=False):
     """
 
     manifest = load_manifest(manifest)
+    client = manifest.get("client", {})
+    plugins = manifest.get("plugins", {})
+    run_strategy = client.get("run_strategy", {"name": "parallel"})
 
-    apply_default_enabled(manifest.get("default_component_enabled", False))
-    load_packages(manifest.get("packages", []))
-    apply_blacklist(manifest.get("blacklist", {}))
-    apply_configs(manifest.get("configs", []))
-    to_persist = get_to_persist(manifest.get("persist", set()))
+    load_packages(plugins.get("packages", []))
+    apply_default_enabled(plugins)
+    apply_configs(plugins)
+
+    apply_blacklist(client.get("blacklist", {}))
+
+    to_persist = get_to_persist(client.get("persist", set()))
 
     hostname = call("hostname -f", env=SAFE_ENV).strip()
     suffix = datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -227,12 +255,15 @@ def collect(manifest=default_manifest, tmp_path=None, compress=False):
     fs.touch(os.path.join(output_path, "insights_archive.txt"))
 
     broker = dr.Broker()
-    ctx = create_context(manifest.get("context", {}))
+    ctx = create_context(client.get("context", {}))
     broker[ctx.__class__] = ctx
 
-    h = Hydration(output_path)
-    broker.add_observer(h.make_persister(to_persist))
-    list(dr.run_incremental(broker=broker))
+    parallel = run_strategy.get("name") == "parallel"
+    pool_args = run_strategy.get("args", {})
+    with get_pool(parallel, pool_args) as pool:
+        h = Hydration(output_path, pool=pool)
+        broker.add_observer(h.make_persister(to_persist))
+        dr.run_all(broker=broker, pool=pool)
 
     if compress:
         return create_archive(output_path)
@@ -246,6 +277,7 @@ def main():
     p.add_argument("-q", "--quiet", help="Error output only.", action="store_true")
     p.add_argument("-v", "--verbose", help="Verbose output.", action="store_true")
     p.add_argument("-d", "--debug", help="Debug output.", action="store_true")
+    p.add_argument("-c", "--compress", help="Compress", action="store_true")
     args = p.parse_args()
 
     level = logging.WARNING
@@ -265,7 +297,7 @@ def main():
         manifest = default_manifest
 
     out_path = args.out_path or tempfile.gettempdir()
-    archive = collect(manifest, out_path, compress=True)
+    archive = collect(manifest, out_path, compress=args.compress)
     print(archive)
 
 

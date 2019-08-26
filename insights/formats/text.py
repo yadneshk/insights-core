@@ -54,11 +54,13 @@ class HumanReadableFormat(Formatter):
             missing=False,
             tracebacks=False,
             dropped=False,
+            fail_only=False,
             stream=sys.stdout):
         self.broker = broker
         self.missing = missing
         self.tracebacks = tracebacks
         self.dropped = dropped
+        self.fail_only = fail_only
         self.stream = stream
 
     def print_header(self, header, color):
@@ -69,15 +71,17 @@ class HumanReadableFormat(Formatter):
 
     def preprocess(self):
         response = namedtuple('response', 'color label intl title')
-        self.responses = {'skip': response(color=Fore.BLUE, label="SKIP", intl='S', title="Missing Deps: "),
-                          'pass': response(color=Fore.GREEN, label="PASS", intl='P', title="Passed      : "),
-                          'fingerprint': response(color=Fore.YELLOW, label="FINGERPRINT", intl='P',
-                                                  title="Fingerprint : "),
-                          'rule': response(color=Fore.RED, label="FAIL", intl='F', title="Failed      : "),
-                          'metadata': response(color=Fore.YELLOW, label="META", intl='M', title="Metadata    : "),
-                          'metadata_key': response(color=Fore.MAGENTA, label="META", intl='K', title="Metadata Key: "),
-                          'exception': response(color=Fore.RED, label="EXCEPT", intl='E', title="Exceptions  : ")
-                          }
+        self.responses = {
+            'pass': response(color=Fore.GREEN, label="PASS", intl='P', title="Passed      : "),
+            'rule': response(color=Fore.RED, label="FAIL", intl='F', title="Failed      : "),
+            'info': response(color=Fore.WHITE, label="INFO", intl='I', title="Info        : "),
+            'skip': response(color=Fore.BLUE, label="SKIP", intl='S', title="Missing Deps: "),
+            'fingerprint': response(color=Fore.YELLOW, label="FINGERPRINT", intl='P',
+                                  title="Fingerprint : "),
+            'metadata': response(color=Fore.YELLOW, label="META", intl='M', title="Metadata    : "),
+            'metadata_key': response(color=Fore.MAGENTA, label="META", intl='K', title="Metadata Key: "),
+            'exception': response(color=Fore.RED, label="EXCEPT", intl='E', title="Exceptions  : ")
+        }
 
         self.counts = {}
         for key in self.responses:
@@ -132,22 +136,24 @@ class HumanReadableFormat(Formatter):
         """ Prints the formatted response for the matching return type """
 
         def printit(c, v):
-            _type = v.get("type")
-            if _type:
-                underline = "-" * len(dr.get_name(c))
-                resp = self.responses[v["type"]]
-                name = "%s[%s] %s%s" % (resp.color, resp.label, dr.get_name(c), Style.RESET_ALL)
-                if _type != "skip" or (_type == "skip" and self.missing):
-                    print(name, file=self.stream)
-                    print(underline, file=self.stream)
-                    print(render(c, v), file=self.stream)
-                    print(file=self.stream)
+            resp = self.responses[v["type"]]
+            name = "[%s] %s" % (resp.label, dr.get_name(c))
+            underline = "-" * len(name)
+            name = "%s%s%s" % (resp.color, name, Style.RESET_ALL)
+            print(name, file=self.stream)
+            print(underline, file=self.stream)
+            print(render(c, v), file=self.stream)
+            print(file=self.stream)
 
         for c in sorted(self.broker.get_by_type(rule), key=dr.get_name):
             v = self.broker[c]
-            if v["type"] in self.responses:
-                self.counts[v["type"]] += 1
-            printit(c, v)
+            _type = v.get('type')
+            if _type in self.responses:
+                self.counts[_type] += 1
+            if (_type and ((self.fail_only and _type == 'rule') or
+                           ((self.missing and _type == 'skip') or
+                            (not self.fail_only and _type != 'skip')))):
+                printit(c, v)
         print(file=self.stream)
 
         self.print_header("Rule Execution Summary", Fore.CYAN)
@@ -174,15 +180,21 @@ class HumanReadableFormatAdapter(FormatterAdapter):
         p.add_argument("-m", "--missing", help="Show missing requirements.", action="store_true")
         p.add_argument("-t", "--tracebacks", help="Show stack traces.", action="store_true")
         p.add_argument("-d", "--dropped", help="Show collected files that weren't processed.", action="store_true")
+        p.add_argument("-F", "--fail-only", help="Show FAIL results only. Conflict with '-m' or '-f', will be dropped when using them together", action="store_true")
 
     def __init__(self, args):
         self.missing = args.missing
         self.tracebacks = args.tracebacks
         self.dropped = args.dropped
+        self.fail_only = args.fail_only
         self.formatter = None
+        if self.missing and self.fail_only:
+            print(Fore.YELLOW + 'Options conflict: -m and -F, drops -F', file=sys.stderr)
+            self.fail_only = False
 
     def preprocess(self, broker):
-        self.formatter = HumanReadableFormat(broker, self.missing, self.tracebacks, self.dropped)
+        self.formatter = HumanReadableFormat(broker,
+                self.missing, self.tracebacks, self.dropped, self.fail_only)
         self.formatter.preprocess()
 
     def postprocess(self, broker):

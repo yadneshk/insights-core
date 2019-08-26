@@ -67,10 +67,10 @@ Examples:
         "flags": "fpu vme de pse tsc msr pae mce",
         "clockspeeds": "2900.000",
         "cache_sizes": "20480 KB"
-        "cpu_cores": "1"
+        "cpu_cores": "1",
+        "stepping": "2",
+        "address_sizes": "40 bits physical, 48 bits virtual"
     }
-
-
 """
 
 from collections import defaultdict
@@ -113,6 +113,8 @@ class CpuInfo(LegacyItemAccess, Parser):
     * **clockspeeds** - the *cpu MHz* line (e.g. ``2900.000``)
     * **cache_sizes** - the *cache size* line (e.g. ``20480 KB``)
     * **cpu_cores** - the *cpu cores* line (e.g. ``1``)
+    * **stepping** - the *stepping* line (e.g. ``2``)
+    * **address_sizes** - the *address sizes* line (e.g. ``40 bits physical, 48 bits virtual``)
     """
 
     def parse_content(self, content):
@@ -128,13 +130,27 @@ class CpuInfo(LegacyItemAccess, Parser):
             "cpu MHz": "clockspeeds",
             "cache size": "cache_sizes",
             "cpu cores": "cpu_cores",
-            "flags": "flags"
+            "flags": "flags",
+            "stepping": "stepping",
+            "Features": "features",
+            "CPU implementer": "cpu_implementer",
+            "CPU architecture": "cpu_architecture",
+            "CPU variant": "cpu_variant",
+            "CPU part": "cpu_part",
+            "CPU revision": "cpu_revision",
+            "cpu": "cpu",
+            "revision": "revision",
+            "address sizes": "address_sizes"
         }
 
         for line in get_active_lines(content, comment_char="COMMAND>"):
             key, value = [p.strip() for p in line.split(":", 1)]
             if key in mappings:
                 self.data[mappings[key]].append(value)
+
+        if "cpu" in self.data and "POWER" in self.data["cpu"][0]:
+            # this works differently than on x86 and is not per-cpu
+            del self.data["model_ids"]
 
         self.data = dict(self.data)
 

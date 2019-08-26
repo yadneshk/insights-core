@@ -10,6 +10,7 @@ import datetime
 import shlex
 import re
 import stat
+import sys
 from subprocess import Popen, PIPE, STDOUT
 from six.moves.configparser import RawConfigParser
 
@@ -221,3 +222,53 @@ def modify_config_file(updates):
     cmd = cmd + constants.default_conf_file
     status = run_command_get_output(cmd)
     write_to_disk(constants.default_conf_file, content=status['output'])
+
+
+def get_version_info():
+    '''
+    Get the insights client and core versions for archival
+    '''
+    from insights.client import InsightsClient
+
+    cmd = 'rpm -q --qf "%{VERSION}-%{RELEASE}" insights-client'
+    version_info = {}
+    version_info['core_version'] = InsightsClient().version()
+    version_info['client_version'] = run_command_get_output(cmd)['output']
+
+    return version_info
+
+
+def print_egg_versions():
+    '''
+    Log all available eggs' versions
+    '''
+    versions = get_version_info()
+    logger.debug('Client version: %s', versions['client_version'])
+    logger.debug('Core version: %s', versions['core_version'])
+    logger.debug('All egg versions:')
+    eggs = [
+        os.getenv('EGG'),
+        '/var/lib/insights/newest.egg',
+        '/var/lib/insights/last_stable.egg',
+        '/etc/insights-client/rpm.egg',
+    ]
+    if not sys.executable:
+        logger.debug('Python executable not found.')
+        return
+
+    for egg in eggs:
+        if egg is None:
+            logger.debug('ENV egg not defined.')
+            continue
+        if not os.path.exists(egg):
+            logger.debug('%s not found.', egg)
+            continue
+        try:
+            proc = Popen([sys.executable, '-c', 'from insights.client import InsightsClient; print(InsightsClient().version())'],
+                         env={'PYTHONPATH': egg, 'PATH': os.getenv('PATH')}, stdout=PIPE, stderr=STDOUT)
+        except OSError:
+            logger.debug('Could not start python.')
+            return
+        stdout, stderr = proc.communicate()
+        version = stdout.decode('utf-8', 'ignore').strip()
+        logger.debug('%s: %s', egg, version)

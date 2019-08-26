@@ -13,34 +13,39 @@ SystemdDocker - file ``/usr/lib/systemd/system/docker.service``
 SystemdLogindConf - file ``/etc/systemd/logind.conf``
 -----------------------------------------------------
 
+SystemdRpcbindSocketConf - unit file ``rpcbind.socket``
+-------------------------------------------------------
+
 SystemdOpenshiftNode - file ``/usr/lib/systemd/system/atomic-openshift-node.service``
 -------------------------------------------------------------------------------------
 
 SystemdSystemConf - file ``/etc/systemd/system.conf``
 -----------------------------------------------------
 
+SystemdOriginAccounting - file ``/etc/systemd/system.conf.d/origin-accounting.conf``
+------------------------------------------------------------------------------------
 """
 
-from insights.configtree.iniconfig import parse_doc
-from insights.core import Parser, LegacyItemAccess
+from insights.core import ConfigParser, LegacyItemAccess
 from insights.core.plugins import parser
+from insights.parsr import iniparser
 from insights.specs import Specs
 from insights.util import deprecated
+from insights import CommandParser
 
 
-class SystemdConf(LegacyItemAccess, Parser):
+class SystemdConf(CommandParser, LegacyItemAccess, ConfigParser):
     """
     Base class for parsing systemd INI like configuration files
 
-    The parsing target should be recorded in INI format, ``ConfigParser`` could
-    be used to parse the content.
-
     """
+    def parse_doc(self, content):
+        return iniparser.parse_doc("\n".join(content), self)
 
     def parse_content(self, content):
-        doc = parse_doc(content)
+        super(SystemdConf, self).parse_content(content)
         dict_all = {}
-        for section in doc:
+        for section in self.doc:
             section_dict = {}
             option_names = set(o.name for o in section)
             for name in option_names:
@@ -103,6 +108,26 @@ class SystemdSystemConf(SystemdConf):
     pass
 
 
+@parser(Specs.systemd_system_origin_accounting)
+class SystemdOriginAccounting(SystemdConf):
+    """
+    Class for systemd master configuration in the ``/etc/systemd/system.conf.d/origin-accounting.conf``
+    file.
+
+    Typical content of the ``/etc/systemd/system.conf.d/origin-accounting.conf`` file is::
+
+        [Manager]
+        DefaultCPUAccounting=yes
+        DefaultMemoryAccounting=yes
+        DefaultBlockIOAccounting=yes
+
+    Example:
+        >>> system_origin_accounting["Manager"]["DefaultCPUAccounting"]
+        'True'
+    """
+    pass
+
+
 @parser(Specs.systemd_openshift_node)
 class SystemdOpenshiftNode(SystemdConf):
     """
@@ -150,6 +175,39 @@ class SystemdLogindConf(SystemdConf):
     pass
 
 
+@parser(Specs.systemctl_cat_rpcbind_socket)
+class SystemdRpcbindSocketConf(SystemdConf):
+    """
+    Class for systemd configuration for rpcbind.socket unit.
+
+    Typical content of the ``rpcbind.socket`` unit file is::
+
+        [Unit]
+        Description=RPCbind Server Activation Socket
+        DefaultDependencies=no
+        Wants=rpcbind.target
+        Before=rpcbind.target
+
+        [Socket]
+        ListenStream=/run/rpcbind.sock
+
+        # RPC netconfig can't handle ipv6/ipv4 dual sockets
+        BindIPv6Only=ipv6-only
+        ListenStream=0.0.0.0:111
+        ListenDatagram=0.0.0.0:111
+        ListenStream=[::]:111
+        ListenDatagram=[::]:111
+
+        [Install]
+        WantedBy=sockets.target
+
+    Example:
+        >>> rpcbind_socket["Socket"]["ListenStream"]
+        ['/run/rpcbind.sock', '0.0.0.0:111', '[::]:111']
+    """
+    pass
+
+
 class MultiOrderedDict(dict):
     """
     .. warning::
@@ -167,27 +225,3 @@ class MultiOrderedDict(dict):
             self[key].extend(value)
         else:
             super(MultiOrderedDict, self).__setitem__(key, value)
-
-
-def parse_systemd_ini(content):
-    """
-    .. warning::
-        This function is deprecated, please use :py:class:`SystemdConf` instead.
-
-    Function to parse config format file, the result format is dictionary.
-    """
-
-    deprecated(parse_systemd_ini, "Use the `SystemdConf` class instead.")
-
-    doc = parse_doc(content)
-
-    dict_all = {}
-    for section in doc:
-        section_dict = {}
-        option_names = set(o.name for o in section)
-        for name in option_names:
-            options = [str(o.value) for o in section[name]]
-            section_dict[name] = options[0] if len(options) == 1 else options
-        dict_all[section.name] = section_dict
-
-    return dict_all
