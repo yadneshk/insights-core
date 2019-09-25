@@ -56,6 +56,35 @@ def erlblock_parser():
     return block
 
 
+# For "Cluster status of node" section parsing only
+def cluster_status_parser():
+    COMMA = p.Suppress(',')
+    LBRACE, RBRACE = map(p.Suppress, "{}")
+    LBRACKET, RBRACKET = map(p.Suppress, "[]")
+
+    key = p.Word(p.alphanums + '_@')
+    value_tnum = p.Word(p.nums + '.')
+    value_tword = p.Word(p.alphanums + '/"-:.()<<>>@\\')
+    value_tstr = p.OneOrMore(value_tword)
+    value_tdoustrs = value_tstr + COMMA + value_tstr
+    value_tnumstr = value_tnum + value_tstr
+    value = value_tdoustrs | value_tnumstr | value_tstr | value_tnum
+
+    attr1 = LBRACKET + p.Group(p.ZeroOrMore(value + COMMA) + p.ZeroOrMore(value)) + RBRACKET
+
+    attr2 = LBRACE + p.Group(key + COMMA + attr1) + RBRACE
+    attr2_dict = p.Dict(p.ZeroOrMore(attr2 + COMMA) + p.ZeroOrMore(attr2))
+    attr2_list = LBRACKET + attr2_dict + RBRACKET
+
+    values_plus = attr1 | value | attr2_list
+
+    attr = LBRACE + p.Group(key + COMMA + values_plus) + RBRACE
+    attr_list = p.Dict(p.ZeroOrMore(attr + COMMA) + p.ZeroOrMore(attr))
+    block = LBRACKET + attr_list + RBRACKET
+
+    return block
+
+
 # For "Permissions on" section parsing only
 def perm_parser():
     COLON = p.Suppress(":")
@@ -80,15 +109,17 @@ def perm_parser():
 def create_parser():
     DOTS = p.Suppress("...")
     NSTAT_PREFIX = p.Suppress("Status of node")
+    CLUSTER_STATUS_PREFIX = p.Suppress("Cluster status of node")
     PERM_PREFIX = p.Suppress("Permissions on")
     nodename = p.Word(p.alphanums + '\'_-@')
 
     block_nstat = p.Group(NSTAT_PREFIX + nodename + DOTS + erlblock_parser())
-    nstat = p.Dict(p.OneOrMore(p.Suppress(p.SkipTo(NSTAT_PREFIX)) +
-            block_nstat)).setResultsName('nstat')
+    nstat = p.Dict(p.OneOrMore(p.Suppress(p.SkipTo(NSTAT_PREFIX)) + block_nstat)).setResultsName('nstat')
+    block_cluster_status = p.Group(CLUSTER_STATUS_PREFIX + nodename + DOTS + cluster_status_parser())
+    cluster_status = p.Dict(p.OneOrMore(p.Suppress(p.SkipTo(CLUSTER_STATUS_PREFIX)) + block_cluster_status)).setResultsName('cluster_status')
     perm = p.Suppress(p.SkipTo(PERM_PREFIX)) + perm_parser().setResultsName('perm')
 
-    return nstat + perm
+    return nstat + cluster_status + perm
 
 
 @parser(Specs.rabbitmq_report)
